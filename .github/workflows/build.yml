@@ -154,7 +154,7 @@ jobs:
         apt install -y --no-install-recommends \
           live-boot live-boot-initramfs-tools \
           initramfs-tools busybox-initramfs \
-          casper lupin-casper
+          casper
         
         # Install network and basic utilities
         apt install -y --no-install-recommends \
