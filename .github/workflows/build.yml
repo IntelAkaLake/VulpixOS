@@ -115,19 +115,10 @@ jobs:
         sudo make INSTALL_MOD_PATH=../../rootfs modules_install
         cd ../..
     
-    - name: Configure base system
+    - name: Create chroot configuration script
       run: |
-        # Prepare chroot environment
-        sudo cp /etc/resolv.conf rootfs/etc/resolv.conf
-        
-        # Mount required filesystems
-        sudo mount --bind /dev rootfs/dev
-        sudo mount --bind /dev/pts rootfs/dev/pts
-        sudo mount --bind /proc rootfs/proc
-        sudo mount --bind /sys rootfs/sys
-        
-        # Configure system in chroot
-        sudo chroot rootfs /bin/bash << 'CHROOT_EOF'
+        cat > configure_chroot.sh << 'SCRIPT_EOF'
+        #!/bin/bash
         set -e
         export HOME=/root
         export LC_ALL=C
@@ -135,11 +126,11 @@ jobs:
         export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         
         # Configure APT sources
-        cat > /etc/apt/sources.list << 'EOF'
+        cat > /etc/apt/sources.list << 'APT_EOF'
         deb http://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse
         deb http://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse
         deb http://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
-        EOF
+        APT_EOF
         
         # Update package lists
         apt update
@@ -201,12 +192,12 @@ jobs:
         
         # Set hostname
         echo 'vulpixos' > /etc/hostname
-        cat > /etc/hosts << 'EOF'
+        cat > /etc/hosts << 'HOSTS_EOF'
         127.0.0.1   localhost vulpixos
         ::1         localhost ip6-localhost ip6-loopback
         ff02::1     ip6-allnodes
         ff02::2     ip6-allrouters
-        EOF
+        HOSTS_EOF
         
         # Create live user
         useradd -m -s /bin/bash -G sudo,audio,video,plugdev,netdev vulpix
@@ -218,7 +209,7 @@ jobs:
         
         # Configure GDM3 for auto-login
         mkdir -p /etc/gdm3
-        cat > /etc/gdm3/custom.conf << 'EOF'
+        cat > /etc/gdm3/custom.conf << 'GDM_EOF'
         [daemon]
         AutomaticLoginEnable=true
         AutomaticLogin=vulpix
@@ -230,24 +221,25 @@ jobs:
         [chooser]
         
         [debug]
-        EOF
+        GDM_EOF
         
         # Configure live boot (adjust based on available packages)
         if command -v casper >/dev/null 2>&1 || [ -f /usr/share/initramfs-tools/scripts/casper ]; then
             echo "Configuring casper..."
-            cat > /etc/casper.conf << 'EOF'
-            export USERNAME="vulpix"
-            export USERFULLNAME="VulpixOS User"
-            export HOST="vulpixos"
-            export BUILD_SYSTEM="Ubuntu"
-            EOF
+            cat > /etc/casper.conf << 'CASPER_EOF'
+        export USERNAME="vulpix"
+        export USERFULLNAME="VulpixOS User"
+        export HOST="vulpixos"
+        export BUILD_SYSTEM="Ubuntu"
+        CASPER_EOF
         else
             echo "Using live-boot configuration..."
-            cat > /etc/live/boot.conf << 'EOF'
-            LIVE_USERNAME="vulpix"
-            LIVE_HOSTNAME="vulpixos"
-            LIVE_USER_FULLNAME="VulpixOS User"
-            EOF
+            mkdir -p /etc/live
+            cat > /etc/live/boot.conf << 'LIVE_EOF'
+        LIVE_USERNAME="vulpix"
+        LIVE_HOSTNAME="vulpixos"
+        LIVE_USER_FULLNAME="VulpixOS User"
+        LIVE_EOF
         fi
         
         # Disable problematic services
@@ -264,7 +256,7 @@ jobs:
         systemctl enable plymouth
         
         # Configure NetworkManager
-        cat > /etc/NetworkManager/NetworkManager.conf << 'EOF'
+        cat > /etc/NetworkManager/NetworkManager.conf << 'NM_EOF'
         [main]
         plugins=ifupdown,keyfile
         
@@ -273,7 +265,7 @@ jobs:
         
         [device]
         wifi.scan-rand-mac-address=no
-        EOF
+        NM_EOF
         
         # Get kernel version and create initramfs
         KERNEL_VERSION=$(ls /lib/modules/ | head -1)
@@ -305,8 +297,24 @@ jobs:
         
         # Clear machine-id for live system
         truncate -s 0 /etc/machine-id
+        SCRIPT_EOF
         
-        CHROOT_EOF
+        chmod +x configure_chroot.sh
+    
+    - name: Configure base system
+      run: |
+        # Prepare chroot environment
+        sudo cp /etc/resolv.conf rootfs/etc/resolv.conf
+        sudo cp configure_chroot.sh rootfs/configure_chroot.sh
+        
+        # Mount required filesystems
+        sudo mount --bind /dev rootfs/dev
+        sudo mount --bind /dev/pts rootfs/dev/pts
+        sudo mount --bind /proc rootfs/proc
+        sudo mount --bind /sys rootfs/sys
+        
+        # Run configuration script in chroot
+        sudo chroot rootfs /configure_chroot.sh
         
         # Copy initramfs to host
         if [ -f rootfs/boot/initrd.img ]; then
@@ -318,7 +326,8 @@ jobs:
             exit 1
         fi
         
-        # Cleanup mounts
+        # Cleanup
+        sudo rm -f rootfs/configure_chroot.sh
         sudo umount rootfs/sys || true
         sudo umount rootfs/proc || true
         sudo umount rootfs/dev/pts || true
@@ -327,7 +336,7 @@ jobs:
     - name: Create GRUB configuration
       run: |
         # BIOS GRUB configuration
-        cat > iso/boot/grub/grub.cfg << 'EOF'
+        cat > iso/boot/grub/grub.cfg << 'GRUB_EOF'
         set timeout=10
         set default=0
         
@@ -369,11 +378,11 @@ jobs:
         menuentry "Memory Test" {
             linux16 /boot/memtest86+.bin
         }
-        EOF
+        GRUB_EOF
         
         # EFI GRUB configuration
         mkdir -p iso/EFI/boot
-        cat > iso/EFI/boot/grub.cfg << 'EOF'
+        cat > iso/EFI/boot/grub.cfg << 'GRUB_EFI_EOF'
         set timeout=10
         set default=0
         
@@ -413,7 +422,7 @@ jobs:
             linux /boot/vmlinuz boot=live live-media-path=/live/ debug systemd.log_level=debug
             initrd /boot/initrd.img
         }
-        EOF
+        GRUB_EFI_EOF
     
     - name: Prepare boot files
       run: |
