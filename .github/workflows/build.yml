@@ -1,3 +1,5 @@
+# VulpixOS GitHub Actions workflow
+# Fixed grub step to avoid needing /dev/sdb1 on GitHub runners
 name: Build VulpixOS
 
 on:
@@ -10,313 +12,225 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install dependencies
-      run: |
-        sudo apt update
-        sudo apt install -y build-essential gcc make binutils libc6-dev
-        sudo apt install -y bc bison flex libssl-dev libelf-dev
-        sudo apt install -y debootstrap squashfs-tools genisoimage xorriso
-        sudo apt install -y isolinux syslinux-utils grub-pc-bin grub-efi-amd64-bin
-        sudo apt install -y mtools dosfstools
-        sudo apt install -y gdisk efibootmgr
-    
-    - name: Create directory structure
-      run: |
-        mkdir -p build rootfs boot iso/boot/grub iso/EFI iso/live kernel scripts config
-    
-    - name: Download kernel source
-      run: |
-        cd build
-        wget -c https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.10.150.tar.xz
-        cd ..
-    
-    - name: Extract and build kernel
-      run: |
-        cd kernel
-        tar -xf ../build/linux-5.10.150.tar.xz
-        cd linux-5.10.150
-        make defconfig
-        
-        # Essential configuration
-        scripts/config --enable CONFIG_FRAMEBUFFER_CONSOLE
-        scripts/config --enable CONFIG_DRM
-        scripts/config --enable CONFIG_DRM_I915
-        scripts/config --enable CONFIG_SND
-        scripts/config --enable CONFIG_SND_HDA_INTEL
-        scripts/config --enable CONFIG_EXT4_FS
-        scripts/config --enable CONFIG_SQUASHFS
-        scripts/config --enable CONFIG_SQUASHFS_XZ
-        scripts/config --enable CONFIG_KERNEL_XZ
-        scripts/config --enable CONFIG_RD_XZ
-        scripts/config --enable CONFIG_EFI_STUB
-        scripts/config --enable CONFIG_EFI
-        scripts/config --enable CONFIG_EFIVAR_FS
-        scripts/config --enable CONFIG_SECURITY_SELINUX_BOOTPARAM
-        scripts/config --enable CONFIG_SECURITY_SELINUX_DISABLE
-        scripts/config --set-val CONFIG_DEFAULT_SECURITY "selinux"
-        
-        make -j$(nproc)
-        
-        # Copy kernel with version detection
-        KERNEL_VERSION=$(make kernelversion)
-        cp arch/x86/boot/bzImage ../../boot/vmlinuz-${KERNEL_VERSION}
-        cp System.map ../../boot/System.map-${KERNEL_VERSION}
-        ln -sf vmlinuz-${KERNEL_VERSION} ../../boot/vmlinuz
-        ln -sf System.map-${KERNEL_VERSION} ../../boot/System.map
-        
-        cd ../..
-    
-    - name: Create base rootfs
-      run: |
-        sudo debootstrap --variant=minbase --include=systemd,init jammy rootfs http://archive.ubuntu.com/ubuntu/
-    
-    - name: Install kernel modules
-      run: |
-        cd kernel/linux-5.10.150
-        sudo make INSTALL_MOD_PATH=../../rootfs modules_install
-        cd ../..
-    
-    - name: Configure base system
-      run: |
-        # Prepare chroot
-        sudo cp /etc/resolv.conf rootfs/etc/resolv.conf
-        
-        # Mount for chroot
-        sudo mount --bind /dev rootfs/dev
-        sudo mount --bind /dev/pts rootfs/dev/pts
-        sudo mount --bind /proc rootfs/proc
-        sudo mount --bind /sys rootfs/sys
-        
-        # Configure system in chroot
-        sudo chroot rootfs /bin/bash << 'CHROOT_EOF'
-        export HOME=/root
-        export LC_ALL=C
-        export DEBIAN_FRONTEND=noninteractive
-        
-        # Add repositories
-        cat > /etc/apt/sources.list << 'EOF'
-        deb http://archive.ubuntu.com/ubuntu jammy main universe
-        deb http://archive.ubuntu.com/ubuntu jammy-updates main universe
-        deb http://security.ubuntu.com/ubuntu jammy-security main universe
-        EOF
-        
-        # Update and install packages
-        apt update
-        
-        # Install essential packages
-        apt install -y --no-install-recommends \
-          systemd init locales \
-          initramfs-tools \
-          live-boot live-boot-initramfs-tools \
-          busybox-initramfs \
-          network-manager \
-          sudo bash-completion vim-tiny less \
-          dbus-x11 xserver-xorg xserver-xorg-video-all \
-          xserver-xorg-input-all xinit x11-xserver-utils
-        
-        # Install GNOME desktop
-        apt install -y --no-install-recommends \
-          ubuntu-desktop-minimal \
-          gnome-session gdm3 \
-          firefox nautilus gnome-terminal \
-          plymouth plymouth-themes
-        
-        # Configure locales
-        locale-gen en_US.UTF-8
-        update-locale LANG=en_US.UTF-8
-        
-        # Set hostname
-        echo 'vulpixos' > /etc/hostname
-        echo '127.0.0.1 localhost vulpixos' >> /etc/hosts
-        
-        # Create user
-        useradd -m -s /bin/bash -G sudo vulpix
-        echo 'vulpix:vulpix' | chpasswd
-        echo 'root:root' | chpasswd
-        
-        # Configure auto-login
-        mkdir -p /etc/systemd/system/getty@tty1.service.d
-        cat > /etc/systemd/system/getty@tty1.service.d/override.conf << 'EOF'
-        [Service]
-        ExecStart=
-        ExecStart=-/sbin/agetty --autologin vulpix --noclear %I $TERM
-        EOF
-        
-        # Configure GDM auto-login
-        mkdir -p /etc/gdm3
-        cat > /etc/gdm3/custom.conf << 'EOF'
-        [daemon]
-        AutomaticLoginEnable=true
-        AutomaticLogin=vulpix
-        EOF
-        
-        # Disable SELinux (for now)
-        apt install -y policycoreutils
-        echo "SELINUX=disabled" > /etc/selinux/config
-        
-        # Fix Plymouth
-        update-alternatives --install /usr/share/plymouth/themes/default.plymouth default.plymouth /usr/share/plymouth/themes/ubuntu-logo/ubuntu-logo.plymouth 100
-        update-alternatives --set default.plymouth /usr/share/plymouth/themes/ubuntu-logo/ubuntu-logo.plymouth
-        
-        # Enable services
-        systemctl enable NetworkManager
-        systemctl enable gdm
-        systemctl set-default graphical.target
-        
-        # Fix user session timeout
-        mkdir -p /etc/systemd/system/user@.service.d
-        cat > /etc/systemd/system/user@.service.d/override.conf << 'EOF'
-        [Service]
-        TimeoutStopSec=20
-        EOF
-        
-        # Get kernel version
-        KERNEL_VERSION=$(ls /lib/modules/ | head -1)
-        echo "Using kernel version: $KERNEL_VERSION"
-        
-        # Create initramfs with explicit kernel version
-        update-initramfs -c -k "$KERNEL_VERSION"
-        
-        # Verify initramfs creation
-        if [ ! -f "/boot/initrd.img-$KERNEL_VERSION" ]; then
-            echo "Creating initramfs manually..."
-            mkinitramfs -o "/boot/initrd.img-$KERNEL_VERSION" "$KERNEL_VERSION"
-        fi
-        
-        cp "/boot/initrd.img-$KERNEL_VERSION" /boot/initrd.img
-        CHROOT_EOF
-        
-        # Copy initramfs to host boot directory
-        sudo cp rootfs/boot/initrd.img boot/initrd.img || {
-            echo "ERROR: Failed to copy initrd.img"
-            sudo ls -la rootfs/boot/
-            exit 1
-        }
-        
-        # Cleanup mounts
-        sudo umount rootfs/sys rootfs/proc rootfs/dev/pts rootfs/dev
-    
-    - name: Create GRUB configuration
-      run: |
-        # BIOS GRUB config
-        cat > iso/boot/grub/grub.cfg << 'EOF'
-        set timeout=5
-        set default=0
-        
-        insmod all_video
-        insmod gzio
-        insmod part_gpt
-        insmod ext2
-        
-        menuentry "VulpixOS Live" {
-            search --no-floppy --set=root --label VULPIXOS
-            linux /boot/vmlinuz boot=live live-media-path=/live/ toram quiet splash security=selinux=0 vt.global_cursor_default=0
-            initrd /boot/initrd.img
-        }
-        
-        menuentry "VulpixOS Install Mode" {
-            search --no-floppy --set=root --label VULPIXOS
-            linux /boot/vmlinuz boot=live live-media-path=/live/ quiet splash security=selinux=0 vt.global_cursor_default=0
-            initrd /boot/initrd.img
-        }
-        
-        menuentry "VulpixOS Safe Mode" {
-            search --no-floppy --set=root --label VULPIXOS
-            linux /boot/vmlinuz boot=live live-media-path=/live/ nomodeset acpi=off security=selinux=0 vt.global_cursor_default=0
-            initrd /boot/initrd.img
-        }
-        EOF
-        
-        # EFI GRUB config
-        mkdir -p iso/EFI/BOOT
-        cat > iso/EFI/BOOT/grub.cfg << 'EOF'
-        set timeout=5
-        set default=0
-        
-        insmod all_video
-        insmod gzio
-        insmod part_gpt
-        insmod ext2
-        
-        menuentry "VulpixOS Live (EFI)" {
-            search --no-floppy --set=root --label VULPIXOS
-            linux /boot/vmlinuz boot=live live-media-path=/live/ toram quiet splash security=selinux=0 vt.global_cursor_default=0
-            initrd /boot/initrd.img
-        }
-        EOF
-    
-    - name: Copy boot files to ISO
-      run: |
-        # Verify files exist
-        if [ ! -f boot/vmlinuz ] || [ ! -f boot/initrd.img ]; then
-            echo "ERROR: Missing boot files!"
-            ls -la boot/
-            exit 1
-        fi
-        
-        cp boot/vmlinuz iso/boot/
-        cp boot/initrd.img iso/boot/
-        
-        # Install GRUB for BIOS and EFI
-        grub-install --target=i386-pc --boot-directory=iso/boot --modules="part_gpt part_msdos" iso/
-        grub-mkimage -o iso/EFI/BOOT/bootx64.efi -p /boot/grub -O x86_64-efi \
-            fat iso9660 part_gpt part_msdos ext2 \
-            normal boot configfile linux multiboot
-    
-    - name: Create squashfs filesystem
-      run: |
-        sudo mksquashfs rootfs iso/live/filesystem.squashfs -comp xz -processors $(nproc) -b 1M
-        ls -lh iso/live/filesystem.squashfs
-    
-    - name: Create ISO
-      run: |
-        # Create EFI boot image
-        dd if=/dev/zero of=efiboot.img bs=1M count=64
-        mkfs.vfat efiboot.img
-        mmd -i efiboot.img ::/EFI
-        mmd -i efiboot.img ::/EFI/BOOT
-        mcopy -i efiboot.img iso/EFI/BOOT/bootx64.efi ::/EFI/BOOT/
-        mcopy -i efiboot.img iso/EFI/BOOT/grub.cfg ::/EFI/BOOT/
-        
-        xorriso -as mkisofs \
-          -volid "VULPIXOS" \
-          -r -J -joliet-long \
-          -iso-level 3 \
-          -partition_offset 16 \
-          --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
-          --mbr-force-bootable \
-          -append_partition 2 0xEF efiboot.img \
-          -appended_part_as_gpt \
-          -c /boot.catalog \
-          -b /boot/grub/i386-pc/eltorito.img \
-          -no-emul-boot -boot-load-size 4 -boot-info-table \
-          --grub2-boot-info \
-          --efi-boot-part --efi-boot-image \
-          -eltorito-alt-boot \
-          -e '--interval:appended_partition_2:all::' \
-          -no-emul-boot \
-          -o VulpixOS.iso \
-          iso/
-        
-        # Verify ISO
-        ls -lh VulpixOS.iso
-        file VulpixOS.iso
-    
-    - name: Upload ISO as artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: VulpixOS-ISO
-        path: VulpixOS.iso
-        retention-days: 30
-    
-    - name: Create Release (on tag)
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v1
-      with:
-        files: VulpixOS.iso
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential gcc make binutils libc6-dev \
+            bc bison flex libssl-dev libelf-dev \
+            debootstrap squashfs-tools genisoimage xorriso \
+            isolinux syslinux-utils grub-pc-bin grub-efi-amd64-bin \
+            mtools dosfstools gdisk efibootmgr
+
+      - name: Create directory structure
+        run: |
+          mkdir -p build rootfs boot iso/boot/grub iso/EFI iso/live kernel scripts config
+
+      - name: Download kernel source
+        run: |
+          cd build && wget -c https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.10.150.tar.xz
+
+      - name: Extract and build kernel
+        run: |
+          mkdir -p kernel && cd kernel
+          tar -xf ../build/linux-5.10.150.tar.xz
+          cd linux-5.10.150
+          make defconfig
+          scripts/config --enable CONFIG_FRAMEBUFFER_CONSOLE
+          scripts/config --enable CONFIG_DRM
+          scripts/config --enable CONFIG_DRM_I915
+          scripts/config --enable CONFIG_SND
+          scripts/config --enable CONFIG_SND_HDA_INTEL
+          scripts/config --enable CONFIG_EXT4_FS
+          scripts/config --enable CONFIG_SQUASHFS
+          scripts/config --enable CONFIG_SQUASHFS_XZ
+          scripts/config --enable CONFIG_KERNEL_XZ
+          scripts/config --enable CONFIG_RD_XZ
+          scripts/config --enable CONFIG_EFI_STUB
+          scripts/config --enable CONFIG_EFI
+          scripts/config --enable CONFIG_EFIVAR_FS
+          scripts/config --enable CONFIG_SECURITY_SELINUX_BOOTPARAM
+          scripts/config --enable CONFIG_SECURITY_SELINUX_DISABLE
+          scripts/config --set-val CONFIG_DEFAULT_SECURITY "selinux"
+          make -j$(nproc)
+          KERNEL_VERSION=$(make kernelversion)
+          cp arch/x86/boot/bzImage ../../boot/vmlinuz-${KERNEL_VERSION}
+          cp System.map ../../boot/System.map-${KERNEL_VERSION}
+          ln -sf vmlinuz-${KERNEL_VERSION} ../../boot/vmlinuz
+          ln -sf System.map-${KERNEL_VERSION} ../../boot/System.map
+
+      - name: Create base rootfs
+        run: |
+          sudo debootstrap --variant=minbase --include=systemd,init jammy rootfs http://archive.ubuntu.com/ubuntu/
+
+      - name: Install kernel modules
+        run: |
+          cd kernel/linux-5.10.150
+          sudo make INSTALL_MOD_PATH=../../rootfs modules_install
+
+      - name: Configure base system
+        run: |
+          sudo cp /etc/resolv.conf rootfs/etc/resolv.conf
+          sudo mount --bind /dev rootfs/dev
+          sudo mount --bind /dev/pts rootfs/dev/pts
+          sudo mount --bind /proc rootfs/proc
+          sudo mount --bind /sys rootfs/sys
+
+          sudo chroot rootfs /bin/bash << 'CHROOT_EOF'
+          export HOME=/root
+          export LC_ALL=C
+          export DEBIAN_FRONTEND=noninteractive
+
+          cat > /etc/apt/sources.list << 'EOF'
+          deb http://archive.ubuntu.com/ubuntu jammy main universe
+          deb http://archive.ubuntu.com/ubuntu jammy-updates main universe
+          deb http://security.ubuntu.com/ubuntu jammy-security main universe
+          EOF
+
+          apt update
+          apt install -y --no-install-recommends \
+            systemd init locales \
+            initramfs-tools \
+            live-boot live-boot-initramfs-tools \
+            busybox-initramfs \
+            network-manager \
+            sudo bash-completion vim-tiny less \
+            dbus-x11 xserver-xorg xserver-xorg-video-all \
+            xserver-xorg-input-all xinit x11-xserver-utils \
+            ubuntu-desktop-minimal \
+            gnome-session gdm3 \
+            firefox nautilus gnome-terminal \
+            plymouth plymouth-themes policycoreutils
+
+          locale-gen en_US.UTF-8
+          update-locale LANG=en_US.UTF-8
+
+          echo 'vulpixos' > /etc/hostname
+          echo '127.0.0.1 localhost vulpixos' >> /etc/hosts
+
+          useradd -m -s /bin/bash -G sudo vulpix
+          echo 'vulpix:vulpix' | chpasswd
+          echo 'root:root' | chpasswd
+
+          mkdir -p /etc/systemd/system/getty@tty1.service.d
+          cat > /etc/systemd/system/getty@tty1.service.d/override.conf << 'EOF'
+          [Service]
+          ExecStart=
+          ExecStart=-/sbin/agetty --autologin vulpix --noclear %I $TERM
+          EOF
+
+          mkdir -p /etc/gdm3
+          cat > /etc/gdm3/custom.conf << 'EOF'
+          [daemon]
+          AutomaticLoginEnable=true
+          AutomaticLogin=vulpix
+          EOF
+
+          echo "SELINUX=disabled" > /etc/selinux/config
+
+          update-alternatives --install /usr/share/plymouth/themes/default.plymouth default.plymouth /usr/share/plymouth/themes/ubuntu-logo/ubuntu-logo.plymouth 100
+          update-alternatives --set default.plymouth /usr/share/plymouth/themes/ubuntu-logo/ubuntu-logo.plymouth
+
+          systemctl enable NetworkManager
+          systemctl enable gdm
+          systemctl set-default graphical.target
+
+          mkdir -p /etc/systemd/system/user@.service.d
+          cat > /etc/systemd/system/user@.service.d/override.conf << 'EOF'
+          [Service]
+          TimeoutStopSec=20
+          EOF
+
+          KERNEL_VERSION=$(ls /lib/modules/ | head -1)
+          update-initramfs -c -k "$KERNEL_VERSION"
+          if [ ! -f "/boot/initrd.img-$KERNEL_VERSION" ]; then
+              mkinitramfs -o "/boot/initrd.img-$KERNEL_VERSION" "$KERNEL_VERSION"
+          fi
+          cp "/boot/initrd.img-$KERNEL_VERSION" /boot/initrd.img
+          CHROOT_EOF
+
+          sudo cp rootfs/boot/initrd.img boot/initrd.img
+          sudo umount rootfs/sys rootfs/proc rootfs/dev/pts rootfs/dev
+
+      - name: Create GRUB configuration
+        run: |
+          cat > iso/boot/grub/grub.cfg << 'EOF'
+          set timeout=5
+          set default=0
+          insmod all_video
+          insmod gzio
+          insmod part_gpt
+          insmod ext2
+          menuentry "VulpixOS Live" {
+              search --no-floppy --set=root --label VULPIXOS
+              linux /boot/vmlinuz boot=live live-media-path=/live/ toram quiet splash security=selinux=0 vt.global_cursor_default=0
+              initrd /boot/initrd.img
+          }
+          EOF
+
+          mkdir -p iso/EFI/BOOT
+          cat > iso/EFI/BOOT/grub.cfg << 'EOF'
+          set timeout=5
+          set default=0
+          insmod all_video
+          insmod gzio
+          insmod part_gpt
+          insmod ext2
+          menuentry "VulpixOS Live (EFI)" {
+              search --no-floppy --set=root --label VULPIXOS
+              linux /boot/vmlinuz boot=live live-media-path=/live/ toram quiet splash security=selinux=0 vt.global_cursor_default=0
+              initrd /boot/initrd.img
+          }
+          EOF
+
+      - name: Copy boot files to ISO
+        run: |
+          cp boot/vmlinuz iso/boot/
+          cp boot/initrd.img iso/boot/
+          mkdir -p iso/boot/grub/i386-pc
+          grub-mkimage -o iso/boot/grub/i386-pc/core.img \
+            -p /boot/grub \
+            biosdisk part_msdos part_gpt ext2 normal configfile linux multiboot
+
+      - name: Create EFI image
+        run: |
+          dd if=/dev/zero of=efiboot.img bs=1M count=64
+          mkfs.vfat efiboot.img
+          mmd -i efiboot.img ::/EFI
+          mmd -i efiboot.img ::/EFI/BOOT
+          mcopy -i efiboot.img iso/EFI/BOOT/bootx64.efi ::/EFI/BOOT/
+          mcopy -i efiboot.img iso/EFI/BOOT/grub.cfg ::/EFI/BOOT/
+
+      - name: Create squashfs and ISO
+        run: |
+          sudo mksquashfs rootfs iso/live/filesystem.squashfs -comp xz -processors $(nproc) -b 1M
+          xorriso -as mkisofs \
+            -volid "VULPIXOS" -r -J -joliet-long -iso-level 3 \
+            --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
+            --mbr-force-bootable \
+            -append_partition 2 0xEF efiboot.img \
+            -appended_part_as_gpt \
+            -c /boot.catalog \
+            -b boot/grub/i386-pc/core.img \
+            -no-emul-boot -boot-load-size 4 -boot-info-table \
+            --grub2-boot-info \
+            --efi-boot-part --efi-boot-image \
+            -eltorito-alt-boot -e '--interval:appended_partition_2:all::' \
+            -no-emul-boot -o VulpixOS.iso iso/
+
+      - name: Upload ISO as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VulpixOS-ISO
+          path: VulpixOS.iso
+          retention-days: 30
+
+      - name: Create Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: VulpixOS.iso
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
