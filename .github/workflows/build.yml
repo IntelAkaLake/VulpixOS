@@ -473,7 +473,6 @@ jobs:
     - name: Create bootable ISO
       run: |
         # Create the ISO with both BIOS and EFI support
-        # Remove compression option that's not supported by xorriso
         grub-mkrescue -o VulpixOS.iso iso/ \
           --verbose \
           --install-modules="part_gpt part_msdos iso9660 search search_fs_uuid search_fs_file normal boot linux configfile"
@@ -484,13 +483,8 @@ jobs:
             ls -lh VulpixOS.iso
             file VulpixOS.iso
             
-            # Make it hybrid bootable if isohybrid is available
-            if command -v isohybrid >/dev/null 2>&1; then
-                isohybrid --uefi VulpixOS.iso
-                echo "Created hybrid ISO with UEFI support"
-            else
-                echo "Note: isohybrid not available, but ISO should still be bootable"
-            fi
+            # Since grub-mkrescue creates a hybrid ISO by default, we don't need isohybrid
+            echo "GRUB-based ISO created with hybrid boot support"
         else
             echo "ERROR: ISO creation failed"
             exit 1
@@ -519,6 +513,10 @@ jobs:
         else
             echo "testiso not available, skipping integrity test"
         fi
+        
+        # Additional verification for bootability
+        echo -e "\n=== Boot Sector Information ==="
+        dd if=VulpixOS.iso bs=512 count=1 2>/dev/null | hexdump -C | head -5
     
     - name: Upload ISO as artifact
       uses: actions/upload-artifact@v4
@@ -543,6 +541,7 @@ jobs:
           - NetworkManager for network connectivity
           - Firefox browser included
           - Both BIOS and UEFI boot support
+          - Hybrid bootable ISO (USB/DVD compatible)
           
           **Boot Options:**
           - VulpixOS Live - Standard boot with toram
@@ -554,5 +553,9 @@ jobs:
           - Username: vulpix
           - Password: vulpix
           - Root password: root
+          
+          **Usage:**
+          - Write to USB: `dd if=VulpixOS.iso of=/dev/sdX bs=4M status=progress`
+          - Or use tools like Rufus, Balena Etcher, or similar
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
