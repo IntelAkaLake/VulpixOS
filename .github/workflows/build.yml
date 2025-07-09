@@ -49,7 +49,7 @@ jobs:
     
     - name: Create base rootfs
       run: |
-        sudo debootstrap --variant=minbase --include=systemd,init,busybox,live-boot,network-manager jammy rootfs http://archive.ubuntu.com/ubuntu/
+        sudo debootstrap --variant=minbase --include=systemd,init,network-manager jammy rootfs http://archive.ubuntu.com/ubuntu/
     
     - name: Install kernel modules
       run: |
@@ -76,9 +76,12 @@ jobs:
           export LC_ALL=C
           export DEBIAN_FRONTEND=noninteractive
           
+          # Add universe repository
+          echo 'deb http://archive.ubuntu.com/ubuntu jammy universe' >> /etc/apt/sources.list
+          
           # Update and configure
           apt update
-          apt install -y locales initramfs-tools
+          apt install -y locales initramfs-tools busybox live-boot
           locale-gen en_US.UTF-8
           update-locale LANG=en_US.UTF-8
           
