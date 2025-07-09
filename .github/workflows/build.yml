@@ -140,12 +140,34 @@ jobs:
         
         # Create initramfs
         update-initramfs -c -k all
-        find /boot -name "initrd.img-*" -exec cp {} /boot/initrd.img \;
+        
+        # Find and copy initramfs with better error handling
+        INITRD_FILE=$(find /boot -name "initrd.img-*" | head -1)
+        if [ -n "$INITRD_FILE" ]; then
+            cp "$INITRD_FILE" /boot/initrd.img
+        else
+            echo "ERROR: No initrd.img found!"
+            exit 1
+        fi
         
         CHROOT_EOF
         
-        # Copy initramfs
-        sudo find rootfs/boot -name "initrd.img-*" -exec cp {} boot/initrd.img \;
+        # Copy initramfs to host boot directory with error checking
+        INITRD_FILE=$(sudo find rootfs/boot -name "initrd.img-*" | head -1)
+        if [ -n "$INITRD_FILE" ]; then
+            sudo cp "$INITRD_FILE" boot/initrd.img
+        else
+            echo "ERROR: No initrd.img found in rootfs!"
+            # Try to create one manually
+            sudo chroot rootfs /bin/bash -c "
+                export HOME=/root
+                export LC_ALL=C
+                export DEBIAN_FRONTEND=noninteractive
+                mkinitramfs -o /boot/initrd.img-manual \$(ls /lib/modules/ | head -1)
+                cp /boot/initrd.img-manual /boot/initrd.img
+            "
+            sudo cp rootfs/boot/initrd.img boot/initrd.img
+        fi
         
         # Cleanup mounts
         sudo umount rootfs/sys rootfs/proc rootfs/dev/pts rootfs/dev
@@ -174,6 +196,34 @@ jobs:
     
     - name: Copy boot files to ISO
       run: |
+        # Check if files exist before copying
+        if [ ! -f boot/vmlinuz ]; then
+            echo "ERROR: vmlinuz not found!"
+            ls -la boot/
+            exit 1
+        fi
+        
+        if [ ! -f boot/initrd.img ]; then
+            echo "ERROR: initrd.img not found!"
+            ls -la boot/
+            
+            # Try to find it in rootfs
+            echo "Searching for initrd in rootfs..."
+            sudo find rootfs/boot -name "initrd*" -type f
+            
+            # Try to create it manually
+            echo "Creating initrd manually..."
+            sudo chroot rootfs /bin/bash -c "
+                export HOME=/root
+                export LC_ALL=C
+                export DEBIAN_FRONTEND=noninteractive
+                KERNEL_VERSION=\$(ls /lib/modules/ | head -1)
+                mkinitramfs -o /boot/initrd.img-manual \$KERNEL_VERSION
+                cp /boot/initrd.img-manual /boot/initrd.img
+            "
+            sudo cp rootfs/boot/initrd.img boot/initrd.img
+        fi
+        
         cp boot/vmlinuz iso/boot/
         cp boot/initrd.img iso/boot/
     
