@@ -30,17 +30,17 @@ jobs:
     - name: Download kernel source
       run: |
         cd build
-        wget -c https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.10.150.tar.xz
+        wget -c https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.38.tar.xz
         cd ..
     
     - name: Extract and build kernel
       run: |
         cd kernel
-        tar -xf ../build/linux-5.10.150.tar.xz
-        cd linux-5.10.150
+        tar -xf ../build/linux-6.1.38.tar.xz
+        cd linux-6.1.38
         make defconfig
         
-        # Enable essential features including compression support
+        # Enable essential features for live system
         scripts/config --enable CONFIG_DRM
         scripts/config --enable CONFIG_DRM_I915
         scripts/config --enable CONFIG_SND
@@ -57,9 +57,21 @@ jobs:
         scripts/config --enable CONFIG_DEVTMPFS_MOUNT
         scripts/config --enable CONFIG_PROC_FS
         scripts/config --enable CONFIG_SYSFS
-        # Enable XZ decompression in kernel
         scripts/config --enable CONFIG_KERNEL_XZ
         scripts/config --enable CONFIG_RD_XZ
+        # Add live boot essentials
+        scripts/config --enable CONFIG_BLK_DEV_LOOP
+        scripts/config --enable CONFIG_BLK_DEV_RAM
+        scripts/config --enable CONFIG_BLK_DEV_INITRD
+        scripts/config --enable CONFIG_INITRAMFS_SOURCE
+        scripts/config --enable CONFIG_RD_GZIP
+        scripts/config --enable CONFIG_RD_BZIP2
+        scripts/config --enable CONFIG_RD_LZMA
+        scripts/config --enable CONFIG_RD_LZO
+        scripts/config --enable CONFIG_RD_LZ4
+        # Disable problematic features
+        scripts/config --disable CONFIG_SECURITY_SELINUX
+        scripts/config --disable CONFIG_SECURITY_APPARMOR
         
         make -j$(nproc)
         
@@ -74,11 +86,11 @@ jobs:
     
     - name: Create base rootfs
       run: |
-        sudo debootstrap --variant=minbase --include=systemd,init jammy rootfs http://archive.ubuntu.com/ubuntu/
+        sudo debootstrap --variant=minbase --include=systemd,init,dbus jammy rootfs http://archive.ubuntu.com/ubuntu/
     
     - name: Install kernel modules
       run: |
-        cd kernel/linux-5.10.150
+        cd kernel/linux-6.1.38
         sudo make INSTALL_MOD_PATH=../../rootfs modules_install
         cd ../..
     
@@ -109,20 +121,22 @@ jobs:
         # Update and install packages
         apt update
         
-        # Install essential packages
+        # Install essential packages first
         apt install -y --no-install-recommends \
-          systemd init locales \
-          initramfs-tools \
+          systemd init locales dbus \
+          initramfs-tools kmod \
           live-boot live-boot-initramfs-tools \
           busybox-initramfs \
           network-manager \
-          sudo bash-completion vim-tiny less
+          sudo bash-completion vim-tiny less \
+          ca-certificates
         
-        # Install GNOME desktop
+        # Install GNOME desktop (minimal)
         apt install -y --no-install-recommends \
           ubuntu-desktop-minimal \
           gnome-session gdm3 \
-          firefox nautilus gnome-terminal
+          firefox nautilus gnome-terminal \
+          gnome-control-center gnome-settings-daemon
         
         # Configure locales
         locale-gen en_US.UTF-8
@@ -137,16 +151,30 @@ jobs:
         echo 'vulpix:vulpix' | chpasswd
         echo 'root:root' | chpasswd
         
-        # Configure auto-login
-        mkdir -p /etc/systemd/system/getty@tty1.service.d
-        cat > /etc/systemd/system/getty@tty1.service.d/override.conf << 'EOF'
-        [Service]
-        ExecStart=
-        ExecStart=-/sbin/agetty --autologin vulpix --noclear %I $TERM
+        # Configure GDM for auto-login
+        mkdir -p /etc/gdm3
+        cat > /etc/gdm3/custom.conf << 'EOF'
+        [daemon]
+        AutomaticLoginEnable=true
+        AutomaticLogin=vulpix
+        
+        [security]
+        
+        [xdmcp]
+        
+        [chooser]
+        
+        [debug]
         EOF
         
         # Enable services
         systemctl enable NetworkManager
+        systemctl enable gdm3
+        
+        # Disable problematic services
+        systemctl disable apparmor || true
+        systemctl disable snapd || true
+        systemctl disable unattended-upgrades || true
         
         # Check what kernel modules we have
         echo "Available kernel modules:"
@@ -155,6 +183,35 @@ jobs:
         # Get the kernel version
         KERNEL_VERSION=$(ls /lib/modules/ | head -1)
         echo "Using kernel version: $KERNEL_VERSION"
+        
+        # Create initramfs configuration for live boot
+        cat > /etc/initramfs-tools/modules << 'EOF'
+        # Live boot essentials
+        loop
+        squashfs
+        overlay
+        isofs
+        EOF
+        
+        # Configure live boot hooks
+        mkdir -p /etc/initramfs-tools/hooks
+        cat > /etc/initramfs-tools/hooks/live-boot << 'EOF'
+        #!/bin/sh
+        PREREQ=""
+        prereqs() { echo "$PREREQ"; }
+        case $1 in
+        prereqs) prereqs; exit 0 ;;
+        esac
+        . /usr/share/initramfs-tools/hook-functions
+        copy_exec /bin/mount
+        copy_exec /bin/umount
+        copy_exec /sbin/losetup
+        manual_add_modules loop
+        manual_add_modules squashfs
+        manual_add_modules overlay
+        manual_add_modules isofs
+        EOF
+        chmod +x /etc/initramfs-tools/hooks/live-boot
         
         # Create initramfs with explicit kernel version
         if [ -n "$KERNEL_VERSION" ]; then
@@ -173,6 +230,13 @@ jobs:
             echo "ERROR: No kernel version found!"
             exit 1
         fi
+        
+        # Clean up to reduce image size
+        apt autoremove -y
+        apt autoclean
+        rm -rf /var/lib/apt/lists/*
+        rm -rf /tmp/*
+        rm -rf /var/tmp/*
         
         CHROOT_EOF
         
@@ -195,26 +259,33 @@ jobs:
         set timeout=5
         set default=0
         
-        # Disable EFI signature check
-        set check_signatures=no
+        # Load necessary modules
+        insmod all_video
+        insmod gzio
+        insmod part_gpt
+        insmod part_msdos
+        insmod fat
+        insmod iso9660
+        insmod loopback
+        insmod squash4
         
         menuentry "VulpixOS Live" {
-            linux /boot/vmlinuz boot=live live-media-path=/live/ toram quiet splash
+            linux /boot/vmlinuz boot=live live-media-path=/live/ toram quiet splash nomodeset
             initrd /boot/initrd.img
         }
         
-        menuentry "VulpixOS Install Mode" {
-            linux /boot/vmlinuz boot=live live-media-path=/live/ quiet splash
-            initrd /boot/initrd.img
-        }
-        
-        menuentry "VulpixOS Safe Mode" {
-            linux /boot/vmlinuz boot=live live-media-path=/live/ nomodeset acpi=off
+        menuentry "VulpixOS Live (Safe Graphics)" {
+            linux /boot/vmlinuz boot=live live-media-path=/live/ toram quiet splash nomodeset vga=normal
             initrd /boot/initrd.img
         }
         
         menuentry "VulpixOS Debug Mode" {
-            linux /boot/vmlinuz boot=live live-media-path=/live/ debug break=mount
+            linux /boot/vmlinuz boot=live live-media-path=/live/ debug break=mount systemd.log_level=debug
+            initrd /boot/initrd.img
+        }
+        
+        menuentry "VulpixOS Persistent Mode" {
+            linux /boot/vmlinuz boot=live live-media-path=/live/ persistence quiet splash nomodeset
             initrd /boot/initrd.img
         }
         EOF
@@ -231,60 +302,104 @@ jobs:
         if [ ! -f boot/initrd.img ]; then
             echo "ERROR: initrd.img not found!"
             ls -la boot/
-            
-            # Try to find it in rootfs
-            echo "Searching for initrd in rootfs..."
-            sudo find rootfs/boot -name "initrd*" -type f
-            
-            # Try to create it manually
-            echo "Creating initrd manually..."
-            sudo chroot rootfs /bin/bash -c "
-                export HOME=/root
-                export LC_ALL=C
-                export DEBIAN_FRONTEND=noninteractive
-                KERNEL_VERSION=\$(ls /lib/modules/ | head -1)
-                mkinitramfs -o /boot/initrd.img-manual \$KERNEL_VERSION
-                cp /boot/initrd.img-manual /boot/initrd.img
-            "
-            sudo cp rootfs/boot/initrd.img boot/initrd.img
+            exit 1
         fi
         
         cp boot/vmlinuz iso/boot/
         cp boot/initrd.img iso/boot/
+        
+        # Verify files are copied
+        ls -la iso/boot/
     
     - name: Create squashfs filesystem
       run: |
-        # Use gzip compression for better compatibility
-        sudo mksquashfs rootfs iso/live/filesystem.squashfs -comp gzip -processors $(nproc) -b 1M
+        # Clean up rootfs before creating squashfs
+        sudo rm -f rootfs/etc/resolv.conf
         
-        # Check the created filesystem
+        # Create squashfs with optimal settings for live system
+        sudo mksquashfs rootfs iso/live/filesystem.squashfs \
+          -comp xz \
+          -processors $(nproc) \
+          -b 1M \
+          -Xbcj x86 \
+          -e boot \
+          -noappend
+        
+        # Verify the filesystem
+        echo "SquashFS filesystem created:"
         ls -lh iso/live/filesystem.squashfs
         file iso/live/filesystem.squashfs
+        
+        # Test the filesystem integrity
+        sudo unsquashfs -l iso/live/filesystem.squashfs | head -20
     
-    - name: Create ISO
+    - name: Create additional live boot files
       run: |
-        # First try: grub-mkrescue with verbose output
-        if grub-mkrescue -o VulpixOS.iso iso/ --verbose; then
-            echo "grub-mkrescue succeeded!"
-        else
-            echo "grub-mkrescue failed, trying alternative method..."
-            
-            # Alternative: Use xorriso directly
-            xorriso -as mkisofs \
-              -r -J -joliet-long \
-              -l -cache-inodes \
-              -iso-level 3 \
-              -full-iso9660-filenames \
-              -volid "VulpixOS" \
-              -o VulpixOS.iso \
-              iso/
-            
-            echo "Created ISO using xorriso!"
-        fi
+        # Create filesystem.size file
+        echo $(sudo du -s rootfs | cut -f1) > iso/live/filesystem.size
+        
+        # Create manifest
+        sudo chroot rootfs dpkg-query -W --showformat='${Package} ${Version}\n' > iso/live/filesystem.manifest
+        
+        # Create filesystem.packages
+        sudo chroot rootfs dpkg-query -W --showformat='${Package}\n' > iso/live/filesystem.packages
+    
+    - name: Create ISO with proper structure
+      run: |
+        # Create isolinux structure as fallback
+        mkdir -p iso/isolinux
+        
+        # Copy isolinux files
+        cp /usr/lib/ISOLINUX/isolinux.bin iso/isolinux/
+        cp /usr/lib/syslinux/modules/bios/menu.c32 iso/isolinux/
+        cp /usr/lib/syslinux/modules/bios/hdt.c32 iso/isolinux/
+        cp /usr/lib/syslinux/modules/bios/ldlinux.c32 iso/isolinux/
+        cp /usr/lib/syslinux/modules/bios/libutil.c32 iso/isolinux/
+        cp /usr/lib/syslinux/modules/bios/libmenu.c32 iso/isolinux/
+        cp /usr/lib/syslinux/modules/bios/libcom32.c32 iso/isolinux/
+        
+        # Create isolinux.cfg
+        cat > iso/isolinux/isolinux.cfg << 'EOF'
+        DEFAULT live
+        LABEL live
+          MENU LABEL VulpixOS Live
+          KERNEL /boot/vmlinuz
+          APPEND initrd=/boot/initrd.img boot=live live-media-path=/live/ toram quiet splash nomodeset
+        
+        LABEL safe
+          MENU LABEL VulpixOS Safe Mode
+          KERNEL /boot/vmlinuz
+          APPEND initrd=/boot/initrd.img boot=live live-media-path=/live/ toram quiet splash nomodeset vga=normal
+        EOF
+        
+        # Create ISO with both BIOS and UEFI support
+        xorriso -as mkisofs \
+          -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
+          -c isolinux/boot.cat \
+          -b isolinux/isolinux.bin \
+          -no-emul-boot \
+          -boot-load-size 4 \
+          -boot-info-table \
+          -eltorito-alt-boot \
+          -e boot/grub/efi.img \
+          -no-emul-boot \
+          -isohybrid-gpt-basdat \
+          -r -J -joliet-long \
+          -l -cache-inodes \
+          -iso-level 3 \
+          -full-iso9660-filenames \
+          -volid "VulpixOS" \
+          -publisher "VulpixOS Team" \
+          -preparer "VulpixOS Build System" \
+          -o VulpixOS.iso \
+          iso/
         
         # Check final result
         ls -lh VulpixOS.iso
         file VulpixOS.iso
+        
+        # Test ISO integrity
+        xorriso -indev VulpixOS.iso -find / -exec report_lba -- | head -10
     
     - name: Upload ISO as artifact
       uses: actions/upload-artifact@v4
