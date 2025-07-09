@@ -21,6 +21,7 @@ jobs:
         sudo apt install -y bc bison flex libssl-dev libelf-dev
         sudo apt install -y debootstrap squashfs-tools genisoimage xorriso
         sudo apt install -y isolinux syslinux-utils grub-pc-bin grub-efi-amd64-bin
+        sudo apt install -y mtools dosfstools   
     
     - name: Create directory structure
       run: |
