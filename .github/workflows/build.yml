@@ -473,45 +473,28 @@ jobs:
     - name: Create bootable ISO
       run: |
         # Create the ISO with both BIOS and EFI support
+        # Remove biosdisk from modules as it's not available in EFI
         grub-mkrescue -o VulpixOS.iso iso/ \
           --verbose \
           --compression=xz \
-          --install-modules="part_gpt part_msdos iso9660 biosdisk search search_fs_uuid search_fs_file normal boot linux configfile" \
+          --install-modules="part_gpt part_msdos iso9660 search search_fs_uuid search_fs_file normal boot linux configfile" \
           --fonts="" \
           --themes="" \
           --locales=""
-        
-        # Make it hybrid bootable
-        if command -v isohybrid >/dev/null 2>&1; then
-            isohybrid --uefi VulpixOS.iso
-            echo "Created hybrid ISO with UEFI support"
-        else
-            echo "Warning: isohybrid not available, trying alternative method"
-            # Alternative method using xorriso
-            xorriso -as mkisofs \
-              -r -J -joliet-long \
-              -l -cache-inodes \
-              -iso-level 3 \
-              -full-iso9660-filenames \
-              -volid "VulpixOS" \
-              -eltorito-boot boot/grub/i386-pc/eltorito.img \
-              -eltorito-catalog boot/grub/boot.cat \
-              -no-emul-boot \
-              -boot-load-size 4 \
-              -boot-info-table \
-              -eltorito-alt-boot \
-              -e EFI/boot/bootx64.efi \
-              -no-emul-boot \
-              -append_partition 2 0xef EFI/boot/bootx64.efi \
-              -o VulpixOS.iso \
-              iso/
-        fi
         
         # Verify ISO creation
         if [ -f VulpixOS.iso ]; then
             echo "ISO created successfully:"
             ls -lh VulpixOS.iso
             file VulpixOS.iso
+            
+            # Make it hybrid bootable if isohybrid is available
+            if command -v isohybrid >/dev/null 2>&1; then
+                isohybrid --uefi VulpixOS.iso
+                echo "Created hybrid ISO with UEFI support"
+            else
+                echo "Note: isohybrid not available, but ISO should still be bootable"
+            fi
         else
             echo "ERROR: ISO creation failed"
             exit 1
