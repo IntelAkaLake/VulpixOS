@@ -473,14 +473,10 @@ jobs:
     - name: Create bootable ISO
       run: |
         # Create the ISO with both BIOS and EFI support
-        # Remove biosdisk from modules as it's not available in EFI
+        # Remove compression option that's not supported by xorriso
         grub-mkrescue -o VulpixOS.iso iso/ \
           --verbose \
-          --compression=xz \
-          --install-modules="part_gpt part_msdos iso9660 search search_fs_uuid search_fs_file normal boot linux configfile" \
-          --fonts="" \
-          --themes="" \
-          --locales=""
+          --install-modules="part_gpt part_msdos iso9660 search search_fs_uuid search_fs_file normal boot linux configfile"
         
         # Verify ISO creation
         if [ -f VulpixOS.iso ]; then
