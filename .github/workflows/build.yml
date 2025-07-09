@@ -148,19 +148,28 @@ jobs:
         apt install -y --no-install-recommends \
           systemd systemd-sysv init \
           udev dbus locales tzdata \
-          sudo passwd
+          sudo passwd \
+          file rsync
+        
+        # Check if casper package is available, if not use alternative
+        if apt-cache show casper >/dev/null 2>&1; then
+            echo "Installing casper for live boot..."
+            apt install -y --no-install-recommends casper
+        else
+            echo "Casper not available, using live-boot only..."
+        fi
         
         # Install live boot system
         apt install -y --no-install-recommends \
           live-boot live-boot-initramfs-tools \
-          initramfs-tools busybox-initramfs \
-          casper
+          initramfs-tools busybox-initramfs
         
         # Install network and basic utilities
         apt install -y --no-install-recommends \
           network-manager wireless-tools wpasupplicant \
           bash-completion vim nano less curl wget \
-          ca-certificates gnupg software-properties-common
+          ca-certificates gnupg software-properties-common \
+          uuid-runtime
         
         # Install X11 and graphics drivers
         apt install -y --no-install-recommends \
@@ -175,7 +184,7 @@ jobs:
           gdm3 gnome-terminal nautilus \
           gnome-control-center gnome-settings-daemon \
           gnome-shell-extensions \
-          firefox-esr
+          firefox
         
         # Install fonts and media support
         apt install -y --no-install-recommends \
@@ -223,13 +232,23 @@ jobs:
         [debug]
         EOF
         
-        # Configure live boot
-        cat > /etc/casper.conf << 'EOF'
-        export USERNAME="vulpix"
-        export USERFULLNAME="VulpixOS User"
-        export HOST="vulpixos"
-        export BUILD_SYSTEM="Ubuntu"
-        EOF
+        # Configure live boot (adjust based on available packages)
+        if command -v casper >/dev/null 2>&1 || [ -f /usr/share/initramfs-tools/scripts/casper ]; then
+            echo "Configuring casper..."
+            cat > /etc/casper.conf << 'EOF'
+            export USERNAME="vulpix"
+            export USERFULLNAME="VulpixOS User"
+            export HOST="vulpixos"
+            export BUILD_SYSTEM="Ubuntu"
+            EOF
+        else
+            echo "Using live-boot configuration..."
+            cat > /etc/live/boot.conf << 'EOF'
+            LIVE_USERNAME="vulpix"
+            LIVE_HOSTNAME="vulpixos"
+            LIVE_USER_FULLNAME="VulpixOS User"
+            EOF
+        fi
         
         # Disable problematic services
         systemctl mask apparmor.service || true
@@ -328,22 +347,22 @@ jobs:
         fi
         
         menuentry "VulpixOS Live" {
-            linux /boot/vmlinuz boot=casper live-media-path=/live/ toram quiet splash
+            linux /boot/vmlinuz boot=live live-media-path=/live/ toram quiet splash
             initrd /boot/initrd.img
         }
         
         menuentry "VulpixOS Persistent" {
-            linux /boot/vmlinuz boot=casper live-media-path=/live/ quiet splash
+            linux /boot/vmlinuz boot=live live-media-path=/live/ quiet splash
             initrd /boot/initrd.img
         }
         
         menuentry "VulpixOS Safe Mode" {
-            linux /boot/vmlinuz boot=casper live-media-path=/live/ nomodeset acpi=off noapic nosplash
+            linux /boot/vmlinuz boot=live live-media-path=/live/ nomodeset acpi=off noapic nosplash
             initrd /boot/initrd.img
         }
         
         menuentry "VulpixOS Debug" {
-            linux /boot/vmlinuz boot=casper live-media-path=/live/ debug systemd.log_level=debug
+            linux /boot/vmlinuz boot=live live-media-path=/live/ debug systemd.log_level=debug
             initrd /boot/initrd.img
         }
         
@@ -376,22 +395,22 @@ jobs:
         fi
         
         menuentry "VulpixOS Live (UEFI)" {
-            linux /boot/vmlinuz boot=casper live-media-path=/live/ toram quiet splash
+            linux /boot/vmlinuz boot=live live-media-path=/live/ toram quiet splash
             initrd /boot/initrd.img
         }
         
         menuentry "VulpixOS Persistent (UEFI)" {
-            linux /boot/vmlinuz boot=casper live-media-path=/live/ quiet splash
+            linux /boot/vmlinuz boot=live live-media-path=/live/ quiet splash
             initrd /boot/initrd.img
         }
         
         menuentry "VulpixOS Safe Mode (UEFI)" {
-            linux /boot/vmlinuz boot=casper live-media-path=/live/ nomodeset acpi=off noapic nosplash
+            linux /boot/vmlinuz boot=live live-media-path=/live/ nomodeset acpi=off noapic nosplash
             initrd /boot/initrd.img
         }
         
         menuentry "VulpixOS Debug (UEFI)" {
-            linux /boot/vmlinuz boot=casper live-media-path=/live/ debug systemd.log_level=debug
+            linux /boot/vmlinuz boot=live live-media-path=/live/ debug systemd.log_level=debug
             initrd /boot/initrd.img
         }
         EOF
