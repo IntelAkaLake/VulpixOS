@@ -74,7 +74,7 @@ jobs:
         scripts/config --enable CONFIG_EFI_VARS
         scripts/config --enable CONFIG_FB_EFI
         
-        # Basic graphics
+        # Basic graphics with better framebuffer support
         scripts/config --enable CONFIG_FB
         scripts/config --enable CONFIG_FB_VESA
         scripts/config --enable CONFIG_FRAMEBUFFER_CONSOLE
@@ -83,6 +83,14 @@ jobs:
         scripts/config --enable CONFIG_VGA_CONSOLE
         scripts/config --enable CONFIG_DRM
         scripts/config --enable CONFIG_DRM_FBDEV_EMULATION
+        scripts/config --enable CONFIG_DRM_BOCHS
+        scripts/config --enable CONFIG_DRM_CIRRUS_QEMU
+        
+        # Logo support for boot splash
+        scripts/config --enable CONFIG_LOGO
+        scripts/config --enable CONFIG_LOGO_LINUX_MONO
+        scripts/config --enable CONFIG_LOGO_LINUX_VGA16
+        scripts/config --enable CONFIG_LOGO_LINUX_CLUT224
         
         # Network
         scripts/config --enable CONFIG_ETHERNET
@@ -166,6 +174,13 @@ jobs:
           initramfs-tools busybox-initramfs || {
             echo "Live boot packages installation failed"
             exit 1
+        }
+        
+        # Install Plymouth for splash screen support
+        apt install -y --no-install-recommends \
+          plymouth plymouth-themes \
+          plymouth-label || {
+            echo "Plymouth installation failed, continuing without splash support"
         }
         
         # Install X11 and minimal graphics
@@ -264,6 +279,19 @@ jobs:
         [debug]
         GDM_EOF
         
+        # Configure Plymouth (if installed)
+        if command -v plymouth-set-default-theme >/dev/null 2>&1; then
+            plymouth-set-default-theme text || true
+            
+            # Configure Plymouth for VulpixOS
+            cat > /etc/plymouth/plymouthd.conf << 'PLYMOUTH_EOF'
+        [Daemon]
+        Theme=text
+        ShowDelay=0
+        DeviceTimeout=5
+        PLYMOUTH_EOF
+        fi
+        
         # Configure live boot
         cat > /etc/casper.conf << 'CASPER_EOF'
         export USERNAME="vulpix"
@@ -360,11 +388,18 @@ jobs:
         # Install neofetch
         apt install -y --no-install-recommends neofetch
         
-        # Create initramfs
+        # Create initramfs with Plymouth support
         KERNEL_VERSION=$(ls /lib/modules/ | head -1)
         echo "Creating initramfs for kernel: $KERNEL_VERSION"
         
         if [ -n "$KERNEL_VERSION" ] && [ -d "/lib/modules/$KERNEL_VERSION" ]; then
+            # Update initramfs configuration for Plymouth
+            if [ -f /etc/initramfs-tools/modules ]; then
+                echo "# VulpixOS - Graphics modules for Plymouth" >> /etc/initramfs-tools/modules
+                echo "fbcon" >> /etc/initramfs-tools/modules
+                echo "vesafb" >> /etc/initramfs-tools/modules
+            fi
+            
             update-initramfs -c -k "$KERNEL_VERSION"
             
             if [ -f "/boot/initrd.img-$KERNEL_VERSION" ]; then
@@ -446,7 +481,7 @@ jobs:
         sudo cp /usr/lib/syslinux/modules/bios/libutil.c32 iso/boot/isolinux/
         sudo cp /usr/lib/syslinux/modules/bios/menu.c32 iso/boot/isolinux/
         
-        # Create syslinux config (more reliable than GRUB for live CDs)
+        # Create syslinux config with safe splash options
         cat > iso/boot/isolinux/isolinux.cfg << 'ISOLINUX_EOF'
         UI menu.c32
         PROMPT 0
@@ -468,7 +503,12 @@ jobs:
         LABEL vulpixos
         MENU LABEL VulpixOS Live
         KERNEL /boot/vmlinuz
-        APPEND initrd=/boot/initrd.img boot=live components splash quiet
+        APPEND initrd=/boot/initrd.img boot=live components quiet
+        
+        LABEL vulpixos-splash
+        MENU LABEL VulpixOS Live (With Splash)
+        KERNEL /boot/vmlinuz
+        APPEND initrd=/boot/initrd.img boot=live components quiet splash plymouth.ignore-serial-consoles
         
         LABEL vulpixos-nosplash
         MENU LABEL VulpixOS Live (No Splash)
@@ -478,7 +518,7 @@ jobs:
         LABEL vulpixos-safe
         MENU LABEL VulpixOS Safe Mode
         KERNEL /boot/vmlinuz
-        APPEND initrd=/boot/initrd.img boot=live components nomodeset acpi=off
+        APPEND initrd=/boot/initrd.img boot=live components nomodeset acpi=off noplymouth
         
         LABEL vulpixos-debug
         MENU LABEL VulpixOS Debug Mode
@@ -490,7 +530,7 @@ jobs:
         KERNEL /boot/memtest
         ISOLINUX_EOF
         
-        # Create GRUB configuration for EFI
+        # Create GRUB configuration for EFI with safe splash options
         cat > iso/EFI/boot/grub.cfg << 'GRUB_EFI_EOF'
         set timeout=10
         set default=0
@@ -506,7 +546,12 @@ jobs:
         insmod efi_uga
         
         menuentry "VulpixOS Live (UEFI)" {
-            linux /boot/vmlinuz boot=live components splash quiet
+            linux /boot/vmlinuz boot=live components quiet
+            initrd /boot/initrd.img
+        }
+        
+        menuentry "VulpixOS Live (UEFI, With Splash)" {
+            linux /boot/vmlinuz boot=live components quiet splash plymouth.ignore-serial-consoles
             initrd /boot/initrd.img
         }
         
@@ -516,7 +561,7 @@ jobs:
         }
         
         menuentry "VulpixOS Safe Mode (UEFI)" {
-            linux /boot/vmlinuz boot=live components nomodeset acpi=off
+            linux /boot/vmlinuz boot=live components nomodeset acpi=off noplymouth
             initrd /boot/initrd.img
         }
         
@@ -636,12 +681,14 @@ jobs:
           - **Network Ready**: NetworkManager with WiFi support
           - **Firefox ESR**: Stable web browser included
           - **Dual Boot**: Both BIOS (ISOLINUX) and UEFI (GRUB) compatible
+          - **Plymouth Support**: Optional splash screen support
           - **No SELinux/AppArmor**: Disabled for maximum stability
           
           ## Boot Options
-          - **VulpixOS Live**: Standard boot mode
-          - **VulpixOS Live (No Splash)**: Boot without splash screen
-          - **VulpixOS Safe Mode**: Boot with safe graphics drivers
+          - **VulpixOS Live**: Standard boot mode (no splash)
+          - **VulpixOS Live (With Splash)**: Boot with Plymouth splash screen
+          - **VulpixOS Live (No Splash)**: Explicitly no splash screen
+          - **VulpixOS Safe Mode**: Boot with safe graphics drivers (no Plymouth)
           - **VulpixOS Debug**: Boot with debug output
           
           ## Default Credentials
@@ -662,8 +709,14 @@ jobs:
           - **Base**: Debian/Ubuntu (rebranded as VulpixOS)
           - **Desktop**: GNOME
           - **Bootloader**: ISOLINUX (BIOS) + GRUB (EFI)
+          - **Splash System**: Plymouth (optional)
           - **Size**: ~2-3GB
           
           Run `neofetch` to see VulpixOS branding!
+          
+          ## Troubleshooting
+          - If splash screen causes boot issues, use "VulpixOS Live (No Splash)" option
+          - For graphics problems, use "VulpixOS Safe Mode"
+          - For debugging, use "VulpixOS Debug Mode"
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
