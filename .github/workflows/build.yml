@@ -155,18 +155,27 @@ jobs:
           bash-completion vim nano less \
           curl wget ca-certificates \
           network-manager wireless-tools \
-          wpasupplicant dhcpcd5
+          wpasupplicant dhcpcd5 || {
+            echo "Essential packages installation failed"
+            exit 1
+        }
         
         # Install live boot system
         apt install -y --no-install-recommends \
           live-boot live-boot-initramfs-tools \
-          initramfs-tools busybox-initramfs
+          initramfs-tools busybox-initramfs || {
+            echo "Live boot packages installation failed"
+            exit 1
+        }
         
         # Install X11 and minimal graphics
         apt install -y --no-install-recommends \
           xorg xserver-xorg-video-all \
           xserver-xorg-input-all \
-          mesa-utils
+          mesa-utils || {
+            echo "X11 packages installation failed"
+            exit 1
+        }
         
         # Install GNOME (minimal but complete)
         apt install -y --no-install-recommends \
@@ -174,9 +183,15 @@ jobs:
           gdm3 gnome-terminal nautilus \
           gnome-control-center \
           gnome-settings-daemon \
-          firefox-esr \
           pulseaudio alsa-utils \
           fonts-dejavu-core fonts-liberation
+        
+        # Install Firefox (regular version for Ubuntu 22.04)
+        apt install -y --no-install-recommends firefox || {
+            echo "Firefox installation failed, trying snap alternative..."
+            apt install -y --no-install-recommends snapd
+            snap install firefox
+        }
         
         # === VULPIXOS BRANDING ===
         
