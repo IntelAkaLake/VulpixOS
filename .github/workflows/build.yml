@@ -27,7 +27,7 @@ jobs:
     
     - name: Create directory structure
       run: |
-        mkdir -p build rootfs boot iso/{boot/grub,EFI/boot,live} kernel scripts config
+        mkdir -p build rootfs boot iso/{boot/{grub,isolinux},EFI/boot,live} kernel scripts config
         mkdir -p rootfs-work
     
     - name: Download and build minimal kernel
@@ -423,43 +423,74 @@ jobs:
         sudo umount rootfs/dev || true
         sudo rm -f rootfs/etc/resolv.conf
     
-    - name: Create stable GRUB configuration
+    - name: Setup bootloader files
       run: |
-        # BIOS GRUB configuration
-        cat > iso/boot/grub/grub.cfg << 'GRUB_EOF'
-        set timeout=10
-        set default=0
+        # Install GRUB files for BIOS boot
+        sudo mkdir -p iso/boot/grub/i386-pc
+        sudo cp -r /usr/lib/grub/i386-pc/* iso/boot/grub/i386-pc/
         
-        # Simple and stable GRUB config
-        insmod part_gpt
-        insmod part_msdos
-        insmod fat
-        insmod iso9660
-        insmod linux
-        insmod normal
+        # Create GRUB EFI boot files
+        sudo mkdir -p iso/EFI/boot
+        sudo grub-mkstandalone \
+          --format=x86_64-efi \
+          --output=iso/EFI/boot/bootx64.efi \
+          --locales="" \
+          --fonts="" \
+          "boot/grub/grub.cfg=iso/EFI/boot/grub.cfg"
         
-        menuentry "VulpixOS Live" {
-            linux /boot/vmlinuz boot=live components splash quiet
-            initrd /boot/initrd.img
-        }
+        # Alternative: Use syslinux for BIOS boot (more reliable)
+        sudo mkdir -p iso/boot/isolinux
+        sudo cp /usr/lib/ISOLINUX/isolinux.bin iso/boot/isolinux/
+        sudo cp /usr/lib/syslinux/modules/bios/ldlinux.c32 iso/boot/isolinux/
+        sudo cp /usr/lib/syslinux/modules/bios/libcom32.c32 iso/boot/isolinux/
+        sudo cp /usr/lib/syslinux/modules/bios/libutil.c32 iso/boot/isolinux/
+        sudo cp /usr/lib/syslinux/modules/bios/menu.c32 iso/boot/isolinux/
         
-        menuentry "VulpixOS Live (No Splash)" {
-            linux /boot/vmlinuz boot=live components
-            initrd /boot/initrd.img
-        }
+        # Create syslinux config (more reliable than GRUB for live CDs)
+        cat > iso/boot/isolinux/isolinux.cfg << 'ISOLINUX_EOF'
+        UI menu.c32
+        PROMPT 0
+        TIMEOUT 100
+        DEFAULT vulpixos
         
-        menuentry "VulpixOS Safe Mode" {
-            linux /boot/vmlinuz boot=live components nomodeset acpi=off
-            initrd /boot/initrd.img
-        }
+        MENU TITLE VulpixOS 1.0 Stable
+        MENU BACKGROUND
+        MENU COLOR border 30;44 #40ffffff #a0000000 std
+        MENU COLOR title 1;36;44 #9033ccff #a0000000 std
+        MENU COLOR sel 7;37;40 #e0ffffff #20ffffff all
+        MENU COLOR unsel 37;44 #50ffffff #a0000000 std
+        MENU COLOR help 37;40 #c0ffffff #a0000000 std
+        MENU COLOR timeout_msg 37;40 #80ffffff #00000000 std
+        MENU COLOR timeout 1;37;40 #c0ffffff #00000000 std
+        MENU COLOR msg07 37;40 #90ffffff #a0000000 std
+        MENU COLOR tabmsg 31;40 #30ffffff #00000000 std
         
-        menuentry "VulpixOS Debug" {
-            linux /boot/vmlinuz boot=live components debug
-            initrd /boot/initrd.img
-        }
-        GRUB_EOF
+        LABEL vulpixos
+        MENU LABEL VulpixOS Live
+        KERNEL /boot/vmlinuz
+        APPEND initrd=/boot/initrd.img boot=live components splash quiet
         
-        # EFI GRUB configuration
+        LABEL vulpixos-nosplash
+        MENU LABEL VulpixOS Live (No Splash)
+        KERNEL /boot/vmlinuz
+        APPEND initrd=/boot/initrd.img boot=live components
+        
+        LABEL vulpixos-safe
+        MENU LABEL VulpixOS Safe Mode
+        KERNEL /boot/vmlinuz
+        APPEND initrd=/boot/initrd.img boot=live components nomodeset acpi=off
+        
+        LABEL vulpixos-debug
+        MENU LABEL VulpixOS Debug Mode
+        KERNEL /boot/vmlinuz
+        APPEND initrd=/boot/initrd.img boot=live components debug
+        
+        LABEL memtest
+        MENU LABEL Memory Test
+        KERNEL /boot/memtest
+        ISOLINUX_EOF
+        
+        # Create GRUB configuration for EFI
         cat > iso/EFI/boot/grub.cfg << 'GRUB_EFI_EOF'
         set timeout=10
         set default=0
@@ -531,15 +562,16 @@ jobs:
     
     - name: Create bootable ISO
       run: |
-        # Create ISO with maximum compatibility
+        # Create ISO with syslinux for BIOS and GRUB for EFI
         xorriso -as mkisofs \
           -iso-level 3 \
           -full-iso9660-filenames \
-          -volid "VulpixOS" \
+          -volid "VULPIXOS" \
           -appid "VulpixOS 1.0 Stable" \
           -publisher "VulpixOS Project" \
           -preparer "VulpixOS Build System" \
-          -eltorito-boot boot/grub/i386-pc/eltorito.img \
+          -eltorito-boot boot/isolinux/isolinux.bin \
+          -eltorito-catalog boot/isolinux/boot.cat \
           -no-emul-boot \
           -boot-load-size 4 \
           -boot-info-table \
@@ -570,6 +602,12 @@ jobs:
             echo "Squashfs integrity check:"
             sudo unsquashfs -ll iso/live/filesystem.squashfs | head -5
         fi
+        
+        echo "=== Boot Configuration Check ==="
+        echo "BIOS boot files:"
+        ls -la iso/boot/isolinux/
+        echo "EFI boot files:"
+        ls -la iso/EFI/boot/
     
     - name: Upload VulpixOS ISO
       uses: actions/upload-artifact@v4
@@ -597,7 +635,7 @@ jobs:
           - **Auto-login**: Automatic login as 'vulpix' user
           - **Network Ready**: NetworkManager with WiFi support
           - **Firefox ESR**: Stable web browser included
-          - **Dual Boot**: Both BIOS and UEFI compatible
+          - **Dual Boot**: Both BIOS (ISOLINUX) and UEFI (GRUB) compatible
           - **No SELinux/AppArmor**: Disabled for maximum stability
           
           ## Boot Options
@@ -623,6 +661,7 @@ jobs:
           - **Kernel**: Linux 6.1.62 LTS
           - **Base**: Debian/Ubuntu (rebranded as VulpixOS)
           - **Desktop**: GNOME
+          - **Bootloader**: ISOLINUX (BIOS) + GRUB (EFI)
           - **Size**: ~2-3GB
           
           Run `neofetch` to see VulpixOS branding!
