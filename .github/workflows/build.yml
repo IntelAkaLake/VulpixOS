@@ -1,4 +1,4 @@
-name: Build VulpixOS
+name: Build VulpixOS Stable
 
 on:
   push:
@@ -22,39 +22,42 @@ jobs:
         sudo apt install -y debootstrap squashfs-tools genisoimage xorriso
         sudo apt install -y isolinux syslinux-utils grub-pc-bin grub-efi-amd64-bin
         sudo apt install -y mtools dosfstools grub-common grub2-common
-        sudo apt install -y syslinux syslinux-common
+        sudo apt install -y syslinux syslinux-common cpio
+        sudo apt install -y rsync curl wget
     
     - name: Create directory structure
       run: |
         mkdir -p build rootfs boot iso/{boot/grub,EFI/boot,live} kernel scripts config
+        mkdir -p rootfs-work
     
-    - name: Download kernel source
+    - name: Download and build minimal kernel
       run: |
         cd build
-        wget -c https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.10.150.tar.xz
-        cd ..
-    
-    - name: Extract and build kernel
-      run: |
-        cd kernel
-        tar -xf ../build/linux-5.10.150.tar.xz
-        cd linux-5.10.150
+        wget -c https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.62.tar.xz
+        tar -xf linux-6.1.62.tar.xz
+        cd linux-6.1.62
+        
+        # Use a proven stable config
         make defconfig
         
+        # Essential but minimal kernel config for maximum stability
+        scripts/config --disable CONFIG_DEBUG_INFO
+        scripts/config --disable CONFIG_DEBUG_KERNEL
+        scripts/config --disable CONFIG_KALLSYMS
+        scripts/config --disable CONFIG_SECURITY_SELINUX
+        scripts/config --disable CONFIG_SECURITY_SMACK
+        scripts/config --disable CONFIG_SECURITY_TOMOYO
+        scripts/config --disable CONFIG_SECURITY_APPARMOR
+        scripts/config --set-str CONFIG_DEFAULT_SECURITY ""
+        scripts/config --disable CONFIG_DEFAULT_SECURITY_SELINUX
+        scripts/config --disable CONFIG_DEFAULT_SECURITY_SMACK
+        scripts/config --disable CONFIG_DEFAULT_SECURITY_TOMOYO
+        scripts/config --disable CONFIG_DEFAULT_SECURITY_APPARMOR
+        
         # Enable essential features
-        scripts/config --enable CONFIG_DRM
-        scripts/config --enable CONFIG_DRM_I915
-        scripts/config --enable CONFIG_DRM_RADEON
-        scripts/config --enable CONFIG_DRM_AMDGPU
-        scripts/config --enable CONFIG_DRM_NOUVEAU
-        scripts/config --enable CONFIG_SND
-        scripts/config --enable CONFIG_SND_HDA_INTEL
         scripts/config --enable CONFIG_EXT4_FS
         scripts/config --enable CONFIG_SQUASHFS
         scripts/config --enable CONFIG_SQUASHFS_XZ
-        scripts/config --enable CONFIG_SQUASHFS_ZLIB
-        scripts/config --enable CONFIG_SQUASHFS_LZO
-        scripts/config --enable CONFIG_SQUASHFS_LZ4
         scripts/config --enable CONFIG_OVERLAY_FS
         scripts/config --enable CONFIG_TMPFS
         scripts/config --enable CONFIG_DEVTMPFS
@@ -71,26 +74,35 @@ jobs:
         scripts/config --enable CONFIG_EFI_VARS
         scripts/config --enable CONFIG_FB_EFI
         
-        # Graphics and console support
+        # Basic graphics
         scripts/config --enable CONFIG_FB
         scripts/config --enable CONFIG_FB_VESA
         scripts/config --enable CONFIG_FRAMEBUFFER_CONSOLE
         scripts/config --enable CONFIG_VT
         scripts/config --enable CONFIG_VT_CONSOLE
         scripts/config --enable CONFIG_VGA_CONSOLE
+        scripts/config --enable CONFIG_DRM
+        scripts/config --enable CONFIG_DRM_FBDEV_EMULATION
         
-        # USB support for modern systems
+        # Network
+        scripts/config --enable CONFIG_ETHERNET
+        scripts/config --enable CONFIG_NET_VENDOR_INTEL
+        scripts/config --enable CONFIG_E1000
+        scripts/config --enable CONFIG_E1000E
+        
+        # USB
         scripts/config --enable CONFIG_USB
         scripts/config --enable CONFIG_USB_EHCI_HCD
         scripts/config --enable CONFIG_USB_OHCI_HCD
         scripts/config --enable CONFIG_USB_UHCI_HCD
         scripts/config --enable CONFIG_USB_XHCI_HCD
+        scripts/config --enable CONFIG_USB_STORAGE
         
-        # Network support
-        scripts/config --enable CONFIG_ETHERNET
-        scripts/config --enable CONFIG_NET_VENDOR_INTEL
-        scripts/config --enable CONFIG_E1000
-        scripts/config --enable CONFIG_E1000E
+        # Sound
+        scripts/config --enable CONFIG_SOUND
+        scripts/config --enable CONFIG_SND
+        scripts/config --enable CONFIG_SND_HDA_INTEL
+        scripts/config --enable CONFIG_SND_HDA_CODEC_REALTEK
         
         make -j$(nproc)
         
@@ -102,22 +114,23 @@ jobs:
         ln -sf System.map-${KERNEL_VERSION} ../../boot/System.map
         
         echo "Kernel version: $KERNEL_VERSION" > ../../boot/kernel-version
+        echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
         
         cd ../..
     
-    - name: Create base rootfs
+    - name: Create base rootfs with proper branding
       run: |
-        sudo debootstrap --variant=minbase --include=systemd,init,dbus jammy rootfs http://archive.ubuntu.com/ubuntu/
-    
-    - name: Install kernel modules
-      run: |
-        cd kernel/linux-5.10.150
+        # Use Ubuntu 22.04 as base but we'll rebrand it completely
+        sudo debootstrap --variant=minbase --include=systemd,systemd-sysv,dbus,init jammy rootfs http://archive.ubuntu.com/ubuntu/
+        
+        # Install kernel modules
+        cd build/linux-6.1.62
         sudo make INSTALL_MOD_PATH=../../rootfs modules_install
         cd ../..
     
-    - name: Create chroot configuration script
+    - name: Create VulpixOS branding and configuration
       run: |
-        cat > configure_chroot.sh << 'SCRIPT_EOF'
+        cat > configure_vulpixos.sh << 'SCRIPT_EOF'
         #!/bin/bash
         set -e
         export HOME=/root
@@ -132,55 +145,77 @@ jobs:
         deb http://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
         APT_EOF
         
-        # Update package lists
         apt update
         
-        # Install essential system packages first
+        # Install essential packages first
         apt install -y --no-install-recommends \
-          systemd systemd-sysv init \
-          udev dbus locales tzdata \
-          sudo passwd \
-          file rsync
-        
-        # Check if casper package is available, if not use alternative
-        if apt-cache show casper >/dev/null 2>&1; then
-            echo "Installing casper for live boot..."
-            apt install -y --no-install-recommends casper
-        else
-            echo "Casper not available, using live-boot only..."
-        fi
+          systemd systemd-sysv init udev dbus \
+          locales tzdata sudo passwd \
+          file rsync uuid-runtime \
+          bash-completion vim nano less \
+          curl wget ca-certificates \
+          network-manager wireless-tools \
+          wpasupplicant dhcpcd5
         
         # Install live boot system
         apt install -y --no-install-recommends \
           live-boot live-boot-initramfs-tools \
           initramfs-tools busybox-initramfs
         
-        # Install network and basic utilities
-        apt install -y --no-install-recommends \
-          network-manager wireless-tools wpasupplicant \
-          bash-completion vim nano less curl wget \
-          ca-certificates gnupg software-properties-common \
-          uuid-runtime
-        
-        # Install X11 and graphics drivers
+        # Install X11 and minimal graphics
         apt install -y --no-install-recommends \
           xorg xserver-xorg-video-all \
           xserver-xorg-input-all \
-          mesa-utils \
-          plymouth plymouth-themes
+          mesa-utils
         
-        # Install GNOME desktop environment
+        # Install GNOME (minimal but complete)
         apt install -y --no-install-recommends \
           gnome-session gnome-shell \
           gdm3 gnome-terminal nautilus \
-          gnome-control-center gnome-settings-daemon \
-          gnome-shell-extensions \
-          firefox
+          gnome-control-center \
+          gnome-settings-daemon \
+          firefox-esr \
+          pulseaudio alsa-utils \
+          fonts-dejavu-core fonts-liberation
         
-        # Install fonts and media support
-        apt install -y --no-install-recommends \
-          fonts-dejavu-core fonts-liberation \
-          pulseaudio alsa-utils
+        # === VULPIXOS BRANDING ===
+        
+        # Create VulpixOS release info
+        cat > /etc/os-release << 'OS_EOF'
+        PRETTY_NAME="VulpixOS 1.0"
+        NAME="VulpixOS"
+        VERSION_ID="1.0"
+        VERSION="1.0 (Stable)"
+        ID=vulpixos
+        ID_LIKE=debian
+        HOME_URL="https://github.com/yourusername/vulpixos"
+        SUPPORT_URL="https://github.com/yourusername/vulpixos/issues"
+        BUG_REPORT_URL="https://github.com/yourusername/vulpixos/issues"
+        OS_EOF
+        
+        # Create lsb-release for compatibility
+        cat > /etc/lsb-release << 'LSB_EOF'
+        DISTRIB_ID=VulpixOS
+        DISTRIB_RELEASE=1.0
+        DISTRIB_CODENAME=stable
+        DISTRIB_DESCRIPTION="VulpixOS 1.0"
+        LSB_EOF
+        
+        # Create VulpixOS version file
+        cat > /etc/vulpixos-version << 'VER_EOF'
+        VulpixOS 1.0 Stable
+        Built: $(date)
+        Kernel: $(uname -r)
+        VER_EOF
+        
+        # Update hostname and hosts
+        echo 'vulpixos' > /etc/hostname
+        cat > /etc/hosts << 'HOSTS_EOF'
+        127.0.0.1   localhost vulpixos
+        ::1         localhost ip6-localhost ip6-loopback
+        ff02::1     ip6-allnodes
+        ff02::2     ip6-allrouters
+        HOSTS_EOF
         
         # Configure locales
         echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
@@ -190,24 +225,15 @@ jobs:
         # Set timezone
         ln -sf /usr/share/zoneinfo/UTC /etc/localtime
         
-        # Set hostname
-        echo 'vulpixos' > /etc/hostname
-        cat > /etc/hosts << 'HOSTS_EOF'
-        127.0.0.1   localhost vulpixos
-        ::1         localhost ip6-localhost ip6-loopback
-        ff02::1     ip6-allnodes
-        ff02::2     ip6-allrouters
-        HOSTS_EOF
-        
-        # Create live user
+        # Create vulpix user
         useradd -m -s /bin/bash -G sudo,audio,video,plugdev,netdev vulpix
-        echo 'vulpix:vulpix' | chpasswd
+        echo 'vulpix:live' | chpasswd
         echo 'root:root' | chpasswd
         
         # Configure sudo
         echo 'vulpix ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/vulpix
         
-        # Configure GDM3 for auto-login
+        # Configure auto-login
         mkdir -p /etc/gdm3
         cat > /etc/gdm3/custom.conf << 'GDM_EOF'
         [daemon]
@@ -223,42 +249,31 @@ jobs:
         [debug]
         GDM_EOF
         
-        # Configure live boot (adjust based on available packages)
-        if command -v casper >/dev/null 2>&1 || [ -f /usr/share/initramfs-tools/scripts/casper ]; then
-            echo "Configuring casper..."
-            cat > /etc/casper.conf << 'CASPER_EOF'
+        # Configure live boot
+        cat > /etc/casper.conf << 'CASPER_EOF'
         export USERNAME="vulpix"
         export USERFULLNAME="VulpixOS User"
         export HOST="vulpixos"
-        export BUILD_SYSTEM="Ubuntu"
+        export BUILD_SYSTEM="VulpixOS"
         CASPER_EOF
-        else
-            echo "Using live-boot configuration..."
-            mkdir -p /etc/live
-            cat > /etc/live/boot.conf << 'LIVE_EOF'
-        LIVE_USERNAME="vulpix"
-        LIVE_HOSTNAME="vulpixos"
-        LIVE_USER_FULLNAME="VulpixOS User"
-        LIVE_EOF
-        fi
         
-        # Disable problematic services
+        # Disable problematic services for stability
         systemctl mask apparmor.service || true
         systemctl mask snapd.service || true
         systemctl mask snapd.socket || true
         systemctl mask ModemManager.service || true
+        systemctl mask systemd-resolved.service || true
         
-        # Enable required services
+        # Enable essential services
         systemctl enable systemd-networkd
-        systemctl enable systemd-resolved
         systemctl enable NetworkManager
         systemctl enable gdm3
-        systemctl enable plymouth
         
-        # Configure NetworkManager
+        # Configure NetworkManager for stability
         cat > /etc/NetworkManager/NetworkManager.conf << 'NM_EOF'
         [main]
         plugins=ifupdown,keyfile
+        dns=default
         
         [ifupdown]
         managed=false
@@ -267,27 +282,85 @@ jobs:
         wifi.scan-rand-mac-address=no
         NM_EOF
         
-        # Get kernel version and create initramfs
+        # Remove Ubuntu branding and add VulpixOS
+        rm -f /etc/issue /etc/issue.net
+        cat > /etc/issue << 'ISSUE_EOF'
+        VulpixOS 1.0 Stable \n \l
+        
+        ISSUE_EOF
+        
+        cat > /etc/issue.net << 'ISSUE_NET_EOF'
+        VulpixOS 1.0 Stable
+        ISSUE_NET_EOF
+        
+        # Create a VulpixOS welcome message
+        cat > /etc/motd << 'MOTD_EOF'
+        
+        Welcome to VulpixOS 1.0 Stable
+        ===============================
+        
+        A minimal, stable Linux distribution built for reliability.
+        
+        Default credentials:
+        - Username: vulpix
+        - Password: live
+        
+        For support, visit: https://github.com/yourusername/vulpixos
+        
+        MOTD_EOF
+        
+        # Create neofetch config for VulpixOS branding
+        mkdir -p /home/vulpix/.config/neofetch
+        cat > /home/vulpix/.config/neofetch/config.conf << 'NEOFETCH_EOF'
+        print_info() {
+            info title
+            info underline
+            info "OS" distro
+            info "Host" model
+            info "Kernel" kernel
+            info "Uptime" uptime
+            info "Packages" packages
+            info "Shell" shell
+            info "Resolution" resolution
+            info "DE" de
+            info "WM" wm
+            info "WM Theme" wm_theme
+            info "Theme" theme
+            info "Icons" icons
+            info "Terminal" term
+            info "Terminal Font" term_font
+            info "CPU" cpu
+            info "GPU" gpu
+            info "Memory" memory
+            info cols
+        }
+        
+        # Override distro detection
+        distro="VulpixOS"
+        os_arch="on"
+        NEOFETCH_EOF
+        
+        chown -R vulpix:vulpix /home/vulpix/.config
+        
+        # Install neofetch
+        apt install -y --no-install-recommends neofetch
+        
+        # Create initramfs
         KERNEL_VERSION=$(ls /lib/modules/ | head -1)
-        echo "Creating initramfs for kernel version: $KERNEL_VERSION"
+        echo "Creating initramfs for kernel: $KERNEL_VERSION"
         
         if [ -n "$KERNEL_VERSION" ] && [ -d "/lib/modules/$KERNEL_VERSION" ]; then
-            # Update initramfs
-            update-initramfs -c -k "$KERNEL_VERSION" || {
-                echo "update-initramfs failed, trying mkinitramfs..."
-                mkinitramfs -o "/boot/initrd.img-$KERNEL_VERSION" "$KERNEL_VERSION"
-            }
+            update-initramfs -c -k "$KERNEL_VERSION"
             
-            # Ensure initrd.img exists
             if [ -f "/boot/initrd.img-$KERNEL_VERSION" ]; then
                 ln -sf "initrd.img-$KERNEL_VERSION" /boot/initrd.img
-                echo "Successfully created initramfs"
+                echo "Initramfs created successfully"
             else
                 echo "ERROR: Failed to create initramfs"
                 exit 1
             fi
         else
-            echo "ERROR: Kernel version not found or modules directory missing"
+            echo "ERROR: Kernel version not found"
             exit 1
         fi
         
@@ -295,17 +368,24 @@ jobs:
         apt autoremove -y
         apt autoclean
         
-        # Clear machine-id for live system
+        # Clear machine-id and logs for live system
         truncate -s 0 /etc/machine-id
+        rm -rf /var/log/* /tmp/* /var/tmp/*
+        
+        # Create directories that might be needed
+        mkdir -p /var/log /tmp /var/tmp
+        chmod 1777 /tmp /var/tmp
+        
+        echo "VulpixOS configuration completed successfully"
         SCRIPT_EOF
         
-        chmod +x configure_chroot.sh
+        chmod +x configure_vulpixos.sh
     
-    - name: Configure base system
+    - name: Configure VulpixOS system
       run: |
         # Prepare chroot environment
         sudo cp /etc/resolv.conf rootfs/etc/resolv.conf
-        sudo cp configure_chroot.sh rootfs/configure_chroot.sh
+        sudo cp configure_vulpixos.sh rootfs/configure_vulpixos.sh
         
         # Mount required filesystems
         sudo mount --bind /dev rootfs/dev
@@ -313,249 +393,223 @@ jobs:
         sudo mount --bind /proc rootfs/proc
         sudo mount --bind /sys rootfs/sys
         
-        # Run configuration script in chroot
-        sudo chroot rootfs /configure_chroot.sh
+        # Run configuration in chroot
+        sudo chroot rootfs /configure_vulpixos.sh
         
-        # Copy initramfs to host
-        if [ -f rootfs/boot/initrd.img ]; then
-            sudo cp rootfs/boot/initrd.img boot/initrd.img
-            echo "Initramfs copied successfully"
-        else
-            echo "ERROR: initrd.img not found!"
-            sudo ls -la rootfs/boot/
-            exit 1
-        fi
+        # Copy initramfs
+        sudo cp rootfs/boot/initrd.img* boot/ || true
+        sudo cp rootfs/boot/initrd.img boot/ || true
         
         # Cleanup
-        sudo rm -f rootfs/configure_chroot.sh
+        sudo rm -f rootfs/configure_vulpixos.sh
         sudo umount rootfs/sys || true
         sudo umount rootfs/proc || true
         sudo umount rootfs/dev/pts || true
         sudo umount rootfs/dev || true
+        sudo rm -f rootfs/etc/resolv.conf
     
-    - name: Create GRUB configuration
+    - name: Create stable GRUB configuration
       run: |
         # BIOS GRUB configuration
         cat > iso/boot/grub/grub.cfg << 'GRUB_EOF'
         set timeout=10
         set default=0
         
-        # Load required modules
+        # Simple and stable GRUB config
         insmod part_gpt
         insmod part_msdos
         insmod fat
         insmod iso9660
-        insmod all_video
-        insmod gfxterm
-        insmod font
-        
-        # Set graphics mode
-        if loadfont /boot/grub/unicode.pf2 ; then
-            set gfxmode=auto
-            terminal_output gfxterm
-        fi
+        insmod linux
+        insmod normal
         
         menuentry "VulpixOS Live" {
-            linux /boot/vmlinuz boot=live live-media-path=/live/ toram quiet splash
+            linux /boot/vmlinuz boot=live components splash quiet
             initrd /boot/initrd.img
         }
         
-        menuentry "VulpixOS Persistent" {
-            linux /boot/vmlinuz boot=live live-media-path=/live/ quiet splash
+        menuentry "VulpixOS Live (No Splash)" {
+            linux /boot/vmlinuz boot=live components
             initrd /boot/initrd.img
         }
         
         menuentry "VulpixOS Safe Mode" {
-            linux /boot/vmlinuz boot=live live-media-path=/live/ nomodeset acpi=off noapic nosplash
+            linux /boot/vmlinuz boot=live components nomodeset acpi=off
             initrd /boot/initrd.img
         }
         
         menuentry "VulpixOS Debug" {
-            linux /boot/vmlinuz boot=live live-media-path=/live/ debug systemd.log_level=debug
+            linux /boot/vmlinuz boot=live components debug
             initrd /boot/initrd.img
-        }
-        
-        menuentry "Memory Test" {
-            linux16 /boot/memtest86+.bin
         }
         GRUB_EOF
         
         # EFI GRUB configuration
-        mkdir -p iso/EFI/boot
         cat > iso/EFI/boot/grub.cfg << 'GRUB_EFI_EOF'
         set timeout=10
         set default=0
         
-        # Load required modules for EFI
+        # EFI GRUB config
         insmod part_gpt
         insmod part_msdos
         insmod fat
         insmod iso9660
-        insmod all_video
-        insmod gfxterm
-        insmod font
+        insmod linux
+        insmod normal
         insmod efi_gop
         insmod efi_uga
         
-        # Set graphics mode
-        if loadfont /EFI/boot/unicode.pf2 ; then
-            set gfxmode=auto
-            terminal_output gfxterm
-        fi
-        
         menuentry "VulpixOS Live (UEFI)" {
-            linux /boot/vmlinuz boot=live live-media-path=/live/ toram quiet splash
+            linux /boot/vmlinuz boot=live components splash quiet
             initrd /boot/initrd.img
         }
         
-        menuentry "VulpixOS Persistent (UEFI)" {
-            linux /boot/vmlinuz boot=live live-media-path=/live/ quiet splash
+        menuentry "VulpixOS Live (UEFI, No Splash)" {
+            linux /boot/vmlinuz boot=live components
             initrd /boot/initrd.img
         }
         
         menuentry "VulpixOS Safe Mode (UEFI)" {
-            linux /boot/vmlinuz boot=live live-media-path=/live/ nomodeset acpi=off noapic nosplash
+            linux /boot/vmlinuz boot=live components nomodeset acpi=off
             initrd /boot/initrd.img
         }
         
         menuentry "VulpixOS Debug (UEFI)" {
-            linux /boot/vmlinuz boot=live live-media-path=/live/ debug systemd.log_level=debug
+            linux /boot/vmlinuz boot=live components debug
             initrd /boot/initrd.img
         }
         GRUB_EFI_EOF
     
     - name: Prepare boot files
       run: |
-        # Verify boot files exist
+        # Verify and copy boot files
         if [ ! -f boot/vmlinuz ]; then
             echo "ERROR: vmlinuz not found!"
-            ls -la boot/
             exit 1
         fi
         
         if [ ! -f boot/initrd.img ]; then
             echo "ERROR: initrd.img not found!"
-            ls -la boot/
             exit 1
         fi
         
-        # Copy boot files to ISO structure
         cp boot/vmlinuz iso/boot/
         cp boot/initrd.img iso/boot/
         
-        # Verify files were copied
-        echo "Boot files in ISO:"
+        echo "Boot files prepared:"
         ls -la iso/boot/
-        
-        # Get file sizes for verification
-        echo "vmlinuz size: $(stat -c%s iso/boot/vmlinuz) bytes"
-        echo "initrd.img size: $(stat -c%s iso/boot/initrd.img) bytes"
     
-    - name: Create filesystem
+    - name: Create optimized filesystem
       run: |
-        # Create squashfs with optimal settings
+        # Create clean, optimized squashfs
         sudo mksquashfs rootfs iso/live/filesystem.squashfs \
-          -comp xz -Xbcj x86 -b 1M -Xdict-size 1M \
+          -comp xz -Xbcj x86 -b 1M \
           -processors $(nproc) \
-          -e boot
+          -e boot tmp var/tmp var/log \
+          -wildcards
         
-        # Create filesystem.size file
+        # Create filesystem.size
         echo $(sudo du -sx --block-size=1 rootfs | cut -f1) > iso/live/filesystem.size
         
-        # Verify squashfs
         echo "Filesystem created:"
         ls -lh iso/live/filesystem.squashfs
-        file iso/live/filesystem.squashfs
-        
-        # Test squashfs integrity
-        sudo unsquashfs -ll iso/live/filesystem.squashfs | head -10
     
     - name: Create bootable ISO
       run: |
-        # Create the ISO with both BIOS and EFI support
-        grub-mkrescue -o VulpixOS.iso iso/ \
-          --verbose \
-          --install-modules="part_gpt part_msdos iso9660 search search_fs_uuid search_fs_file normal boot linux configfile"
+        # Create ISO with maximum compatibility
+        xorriso -as mkisofs \
+          -iso-level 3 \
+          -full-iso9660-filenames \
+          -volid "VulpixOS" \
+          -appid "VulpixOS 1.0 Stable" \
+          -publisher "VulpixOS Project" \
+          -preparer "VulpixOS Build System" \
+          -eltorito-boot boot/grub/i386-pc/eltorito.img \
+          -no-emul-boot \
+          -boot-load-size 4 \
+          -boot-info-table \
+          -eltorito-alt-boot \
+          -e EFI/boot/bootx64.efi \
+          -no-emul-boot \
+          -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
+          -isohybrid-gpt-basdat \
+          -output VulpixOS.iso \
+          iso/
         
-        # Verify ISO creation
-        if [ -f VulpixOS.iso ]; then
-            echo "ISO created successfully:"
-            ls -lh VulpixOS.iso
-            file VulpixOS.iso
-            
-            # Since grub-mkrescue creates a hybrid ISO by default, we don't need isohybrid
-            echo "GRUB-based ISO created with hybrid boot support"
-        else
-            echo "ERROR: ISO creation failed"
-            exit 1
-        fi
+        echo "ISO created:"
+        ls -lh VulpixOS.iso
     
-    - name: Verify ISO structure
+    - name: Test ISO integrity
       run: |
-        echo "=== ISO Structure Verification ==="
+        echo "=== ISO Information ==="
+        file VulpixOS.iso
         
-        # Check ISO info
+        echo "=== ISO Structure ==="
         isoinfo -d -i VulpixOS.iso
         
-        echo -e "\n=== Boot Files ==="
-        isoinfo -l -i VulpixOS.iso | grep -E "(vmlinuz|initrd|grub)" | head -10
+        echo "=== Boot Files Check ==="
+        isoinfo -l -i VulpixOS.iso | grep -E "(vmlinuz|initrd|filesystem)" | head -10
         
-        echo -e "\n=== EFI Files ==="
-        isoinfo -l -i VulpixOS.iso | grep -i efi | head -10
-        
-        echo -e "\n=== Live Files ==="
-        isoinfo -l -i VulpixOS.iso | grep -i live | head -10
-        
-        # Test ISO integrity
-        echo -e "\n=== ISO Integrity Test ==="
-        if command -v testiso >/dev/null 2>&1; then
-            testiso VulpixOS.iso
-        else
-            echo "testiso not available, skipping integrity test"
+        echo "=== Filesystem Check ==="
+        if [ -f iso/live/filesystem.squashfs ]; then
+            echo "Squashfs integrity check:"
+            sudo unsquashfs -ll iso/live/filesystem.squashfs | head -5
         fi
-        
-        # Additional verification for bootability
-        echo -e "\n=== Boot Sector Information ==="
-        dd if=VulpixOS.iso bs=512 count=1 2>/dev/null | hexdump -C | head -5
     
-    - name: Upload ISO as artifact
+    - name: Upload VulpixOS ISO
       uses: actions/upload-artifact@v4
       with:
-        name: VulpixOS-ISO
+        name: VulpixOS-Stable-ISO
         path: VulpixOS.iso
         retention-days: 30
         compression-level: 0
     
-    - name: Create Release (on tag)
+    - name: Create Release
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
       with:
         files: VulpixOS.iso
-        name: VulpixOS Release ${{ github.ref_name }}
+        name: VulpixOS ${{ github.ref_name }}
         body: |
-          VulpixOS Live ISO - Ready to boot into GNOME desktop
+          # VulpixOS 1.0 Stable Release
           
-          **Features:**
-          - GNOME desktop environment
-          - Auto-login as 'vulpix' user
-          - NetworkManager for network connectivity
-          - Firefox browser included
-          - Both BIOS and UEFI boot support
-          - Hybrid bootable ISO (USB/DVD compatible)
+          A minimal, stable Linux distribution built for maximum reliability.
           
-          **Boot Options:**
-          - VulpixOS Live - Standard boot with toram
-          - VulpixOS Persistent - Boot without toram
-          - VulpixOS Safe Mode - Boot with safe graphics
-          - VulpixOS Debug - Boot with debug output
+          ## Features
+          - **Stable Kernel**: Linux 6.1.62 LTS with minimal configuration
+          - **GNOME Desktop**: Clean, minimal GNOME environment
+          - **VulpixOS Branding**: Proper OS identification (shows as VulpixOS in neofetch)
+          - **Auto-login**: Automatic login as 'vulpix' user
+          - **Network Ready**: NetworkManager with WiFi support
+          - **Firefox ESR**: Stable web browser included
+          - **Dual Boot**: Both BIOS and UEFI compatible
+          - **No SELinux/AppArmor**: Disabled for maximum stability
           
-          **Credentials:**
-          - Username: vulpix
-          - Password: vulpix
-          - Root password: root
+          ## Boot Options
+          - **VulpixOS Live**: Standard boot mode
+          - **VulpixOS Live (No Splash)**: Boot without splash screen
+          - **VulpixOS Safe Mode**: Boot with safe graphics drivers
+          - **VulpixOS Debug**: Boot with debug output
           
-          **Usage:**
-          - Write to USB: `dd if=VulpixOS.iso of=/dev/sdX bs=4M status=progress`
-          - Or use tools like Rufus, Balena Etcher, or similar
+          ## Default Credentials
+          - **Username**: vulpix
+          - **Password**: live
+          - **Root Password**: root
+          
+          ## Usage
+          Write to USB drive:
+          ```bash
+          sudo dd if=VulpixOS.iso of=/dev/sdX bs=4M status=progress && sync
+          ```
+          
+          Or use GUI tools like Rufus, Balena Etcher, or Ventoy.
+          
+          ## System Information
+          - **Kernel**: Linux 6.1.62 LTS
+          - **Base**: Debian/Ubuntu (rebranded as VulpixOS)
+          - **Desktop**: GNOME
+          - **Size**: ~2-3GB
+          
+          Run `neofetch` to see VulpixOS branding!
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
